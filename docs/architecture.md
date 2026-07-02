@@ -80,6 +80,9 @@ flowchart LR
 schema.
 
 - the database name remains `account`
+- runtime access should use a non-superuser service account such as
+  `svcplus_vps` or a dedicated `billing` role
+- `postgres` should only be used for maintenance, migration, or bootstrap
 - on `jp-xhttp-contabo.svc.plus`, `accounts.svc.plus` reaches it through
   `stunnel-client:15432`
 - `billing-service` must point `DATABASE_URL` at that same PostgreSQL target so

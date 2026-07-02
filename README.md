@@ -7,6 +7,14 @@ It pulls windowed normalized snapshots from one or more `xray-exporter`
 sources, computes deltas from cumulative counters, and writes idempotent usage
 and billing facts into the existing `accounts.svc.plus` PostgreSQL schema.
 
+Deployment note:
+
+- `billing-service` must point `DATABASE_URL` at the already provisioned
+  `accounts.svc.plus` database
+- it should not be used to create or bootstrap schema on production hosts
+- the accounting tables it reads and writes are expected to exist before the
+  service starts
+
 ## Endpoints
 
 - `GET /api/ping`

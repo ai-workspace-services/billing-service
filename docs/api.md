@@ -199,6 +199,11 @@ Source configuration rule:
 `DATABASE_URL` rule:
 
 - it must point to the same `account` database that `accounts.svc.plus` uses
+- it should authenticate as a non-superuser service account such as
+  `svcplus_vps` or a dedicated `billing` role
+- prefer `BILLING_DB_USER` and `BILLING_DB_PASSWORD` over generic
+  `POSTGRES_*` environment variables when the deployment synthesizes a DSN
+- `postgres` is reserved for maintenance and bootstrap, not runtime traffic
 - on `jp-xhttp-contabo.svc.plus`, the current accounts containers use
   `DB_HOST=stunnel-client`, `DB_PORT=15432`, and `DB_NAME=account`
 - `billing-service` should follow that same target so user-facing reads in

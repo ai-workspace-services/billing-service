@@ -59,6 +59,12 @@ Notes:
 - `DATABASE_URL` must be exported before running `deploy_billing_service.yml`
 - on `jp-xhttp-contabo.svc.plus`, `DATABASE_URL` should reference the same
   `account` database used by `accounts.svc.plus`
+- `BILLING_DB_USER` and `BILLING_DB_PASSWORD` are the preferred deployment
+  inputs when synthesizing `DATABASE_URL`
+- the runtime account should be a non-superuser service role such as
+  `svcplus_vps` or a dedicated `billing` role
+- avoid `postgres` for runtime traffic; reserve it for maintenance and
+  bootstrap only
 - check mode may report predicted changes; the goal is to pass the preflight
   assertion and render a valid deployment plan
 - GitHub Actions uses the `BILLING_SERVICE_DATABASE_URL` secret to satisfy the
