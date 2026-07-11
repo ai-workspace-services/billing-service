@@ -43,7 +43,7 @@ func main() {
 
 	// Initialize and start FinOps Syncer (Cloud Billing)
 	logger := slog.Default()
-	finopsSyncer := service.NewFinOpsSyncer(repo, logger)
+	finopsSyncer := service.NewFinOpsSyncer(repo, logger, cfg)
 	go finopsSyncer.Start(ctx)
 
 	server := &http.Server{

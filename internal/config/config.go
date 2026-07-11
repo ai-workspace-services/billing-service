@@ -35,6 +35,22 @@ type Config struct {
 	PricePerByte              float64
 	InitialIncludedQuotaBytes int64
 	InitialBalance            float64
+
+	// AWS FinOps Config
+	AWSAccessKeyID     string
+	AWSSecretAccessKey string
+
+	// GCP FinOps Config
+	GCPCredentialsJSON string
+	GCPBillingProject  string
+	GCPBillingDataset  string
+	GCPBillingTable    string
+
+	// Azure FinOps Config
+	AzureTenantID       string
+	AzureClientID       string
+	AzureClientSecret   string
+	AzureSubscriptionID string
 }
 
 type rawExporterSource struct {
@@ -60,6 +76,22 @@ func Load() (Config, error) {
 		ListenAddr:           strings.TrimSpace(os.Getenv("LISTEN_ADDR")),
 		DefaultRegion:        strings.TrimSpace(os.Getenv("DEFAULT_REGION")),
 		SourceRevision:       strings.TrimSpace(os.Getenv("SOURCE_REVISION")),
+
+		// AWS FinOps Config
+		AWSAccessKeyID:     strings.TrimSpace(os.Getenv("AWS_ACCESS_KEY_ID")),
+		AWSSecretAccessKey: strings.TrimSpace(os.Getenv("AWS_SECRET_ACCESS_KEY")),
+
+		// GCP FinOps Config
+		GCPCredentialsJSON: strings.TrimSpace(os.Getenv("GCP_CREDENTIALS_JSON")),
+		GCPBillingProject:  strings.TrimSpace(os.Getenv("GCP_BILLING_PROJECT")),
+		GCPBillingDataset:  strings.TrimSpace(os.Getenv("GCP_BILLING_DATASET")),
+		GCPBillingTable:    strings.TrimSpace(os.Getenv("GCP_BILLING_TABLE")),
+
+		// Azure FinOps Config
+		AzureTenantID:       strings.TrimSpace(os.Getenv("AZURE_TENANT_ID")),
+		AzureClientID:       strings.TrimSpace(os.Getenv("AZURE_CLIENT_ID")),
+		AzureClientSecret:   strings.TrimSpace(os.Getenv("AZURE_CLIENT_SECRET")),
+		AzureSubscriptionID: strings.TrimSpace(os.Getenv("AZURE_SUBSCRIPTION_ID")),
 	}
 	if cfg.ListenAddr == "" {
 		cfg.ListenAddr = ":8081"
