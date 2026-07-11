@@ -42,6 +42,10 @@
 - **Vault 路径定型**:Stripe 密钥归 `kv/billing-service`(STRIPE_SECRET_KEY / STRIPE_WEBHOOK_SECRET),与 accounts OAuth 密钥分域。
 - P1 实现进度见 accounts [#19](https://github.com/ai-workspace-services/accounts/pull/19)(目录/审计/entitlement sync/PGMQ 生产者,测试全绿)。
 
+## 扩版(2026-07-12):并入成本侧 FinOps
+
+用户指令:把多云 FinOps 线([PR#6](https://github.com/ai-workspace-services/billing-service/pull/6) MERGED 表+骨架、[PR#8](https://github.com/ai-workspace-services/billing-service/pull/8) OPEN 真 SDK)并入本规划 → 文档升级为三线 FinOps 全景(收入 Stripe / 用量 xray / 成本 multi-cloud),新增 §0 全景、§2.3 成本侧、F0/F1 分期;FinOps 三云凭据(AWS keys / GCP SA JSON+BQ 三元组 / Azure 四元组)与 Stripe 密钥同归 Vault `kv/billing-service`(§2.2 密钥总表)。成本侧不走 PGMQ(T-2 定时拉取无事件性);F1 出毛利/单位成本报表反哺套餐定价。
+
 ## 遗留待办
 
 - [ ] P0 起排期,产出 PR 后回填本文件的 Related PRs
