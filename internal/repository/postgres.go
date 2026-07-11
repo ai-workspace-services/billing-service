@@ -325,6 +325,41 @@ func (p *Postgres) UpsertSourceSyncState(ctx context.Context, state model.Source
 	return err
 }
 
+func (p *Postgres) UpsertCloudVendorCost(ctx context.Context, cost model.CloudVendorCost) error {
+	const query = `
+		INSERT INTO cloud_vendor_costs (
+			id, provider, account_id, service_name, region, usage_start_time, usage_end_time, cost_amount, currency, usage_quantity, usage_unit, created_at
+		) VALUES (COALESCE($1, gen_random_uuid()), $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, now())
+		ON CONFLICT (provider, account_id, service_name, region, usage_start_time) DO UPDATE SET
+			usage_end_time = EXCLUDED.usage_end_time,
+			cost_amount = EXCLUDED.cost_amount,
+			currency = EXCLUDED.currency,
+			usage_quantity = EXCLUDED.usage_quantity,
+			usage_unit = EXCLUDED.usage_unit
+	`
+
+	// Handle nil pointer for UUID
+	var id interface{}
+	if cost.ID.String() != "00000000-0000-0000-0000-000000000000" {
+		id = cost.ID
+	}
+
+	_, err := p.db.ExecContext(ctx, query,
+		id,
+		cost.Provider,
+		cost.AccountID,
+		cost.ServiceName,
+		cost.Region,
+		cost.UsageStartTime.UTC(),
+		cost.UsageEndTime.UTC(),
+		cost.CostAmount,
+		cost.Currency,
+		cost.UsageQuantity,
+		cost.UsageUnit,
+	)
+	return err
+}
+
 var _ Repository = (*Postgres)(nil)
 
 func ensureUTC(ts time.Time) time.Time {

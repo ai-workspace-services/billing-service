@@ -16,4 +16,5 @@ type Repository interface {
 	GetBillingProfile(ctx context.Context, accountUUID string) (*model.BillingProfile, error)
 	GetSourceSyncState(ctx context.Context, sourceID string) (*model.SourceSyncState, error)
 	UpsertSourceSyncState(ctx context.Context, state model.SourceSyncState) error
+	UpsertCloudVendorCost(ctx context.Context, cost model.CloudVendorCost) error
 }

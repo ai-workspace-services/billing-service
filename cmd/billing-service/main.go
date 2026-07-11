@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"log"
+	"log/slog"
 	"net/http"
 	"os/signal"
 	"syscall"
@@ -32,12 +33,18 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	repo := repository.NewPostgres(db)
 	svc := service.New(
 		cfg,
 		exporter.NewClient(cfg.InternalServiceToken),
-		repository.NewPostgres(db),
+		repo,
 	)
 	svc.Start(ctx)
+
+	// Initialize and start FinOps Syncer (Cloud Billing)
+	logger := slog.Default()
+	finopsSyncer := service.NewFinOpsSyncer(repo, logger)
+	go finopsSyncer.Start(ctx)
 
 	server := &http.Server{
 		Addr:    cfg.ListenAddr,
