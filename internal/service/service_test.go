@@ -140,14 +140,19 @@ func cloneSyncState(state model.SourceSyncState) model.SourceSyncState {
 	return copy
 }
 
+func (m *memoryRepo) UpsertCloudVendorCost(ctx context.Context, cost model.CloudVendorCost) error {
+	// Dummy implementation for tests
+	return nil
+}
+
 var _ repository.Repository = (*memoryRepo)(nil)
 
 func baseConfig() config.Config {
 	return config.Config{
-		ImageRef:                  "registry.example.com/billing-service:sha-0123456789abcdef0123456789abcdef01234567",
-		ImageTag:                  "sha-0123456789abcdef0123456789abcdef01234567",
-		ImageCommit:               "0123456789abcdef0123456789abcdef01234567",
-		ImageVersion:              "0123456789abcdef0123456789abcdef01234567",
+		ImageRef:     "registry.example.com/billing-service:sha-0123456789abcdef0123456789abcdef01234567",
+		ImageTag:     "sha-0123456789abcdef0123456789abcdef01234567",
+		ImageCommit:  "0123456789abcdef0123456789abcdef01234567",
+		ImageVersion: "0123456789abcdef0123456789abcdef01234567",
 		ExporterSources: []config.ExporterSource{{
 			SourceID:       "default",
 			BaseURL:        "https://jp-xhttp-contabo.svc.plus",
