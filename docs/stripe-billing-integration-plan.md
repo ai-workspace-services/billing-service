@@ -91,7 +91,24 @@
 - **Stripe** = 钱的事实源(价格、发票、退款都以它为准)。
 - **accounts** = 订阅与权益的事实源,唯一持有 Stripe API key,唯一写 `subscriptions`/`account_billing_profiles` 的服务。
 - **billing-service** = 用量的事实源,只读 profiles、只写用量/账本/配额消耗;**不碰 Stripe**。
-- 联动通道 = 共享 PG 表(现状即如此),不引入消息队列。
+- 联动通道 = **共享 PG 表 + PGMQ 消息队列**(2026-07-11 修订):状态类数据(profiles/quota)走共享表;生命周期通知走 PGMQ `billing_events` 队列(扩展 **pgmq v1.8.0**,postgresql.svc.plus 运行时镜像内置,与 pgvector/pg_jieba 同装)。不引入外部 MQ 组件 —— 队列就在同一个 PG 里。
+
+### 2.1 PGMQ `billing_events` 队列(已实现,accounts feat/stripe-billing-p1)
+
+- **生产者**:accounts 在 entitlement sync 各点位发布紧凑事件:`subscription_activated` / `subscription_updated` / `invoice_paid` / `payment_failed` / `subscription_deleted` / `trial_provisioned`,payload 含 userId/planId/priceId/externalId/occurredAt。
+- **降级策略**:启动时 `EnsureBillingEventQueue`(检测/尝试 `CREATE EXTENSION pgmq` + `pgmq.create('billing_events')`);扩展不可用则发布静默 no-op,webhook 主流程永不因队列失败;去重重放不重复发布。线上 accounts 库 pgmq **available 未安装**,operator 需一次 `CREATE EXTENSION pgmq`(superuser)。
+- **消费者**(本仓,P1.5/P3 接入):`pgmq.read('billing_events', vt, qty)` + 处理后 `pgmq.delete/archive`;用于 arrears 升级触发、对账增量、催缴通知,替代轮询。消费失败消息按 pgmq 可见性超时自动重投。
+
+### 2.2 密钥存储(2026-07-11 修订)
+
+Stripe 密钥的 Vault source-of-truth 归**本服务路径 `kv/billing-service`**(与 accounts 的 OAuth 密钥 kv/accounts.svc.plus 分域):
+
+| Vault `kv/billing-service` 字段 | 用途 | 同步到 |
+|---|---|---|
+| `STRIPE_SECRET_KEY` | Stripe API key(accounts 容器 env 消费) | GH secret `STRIPE_SECRET_KEY`(accounts 仓) |
+| `STRIPE_WEBHOOK_SECRET` | webhook 签名校验 | GH secret `STRIPE_WEBHOOK_SECRET`(accounts 仓) |
+
+`STRIPE_ALLOWED_PRICE_IDS` 非密钥(repo var,且 P1 后目录为准仅作 bootstrap 兜底),不入 Vault。
 
 ## 3. 灵活性设计(“方便灵活调整”的落点)
 

@@ -36,6 +36,12 @@
 - **结论**:欠费→执行缺最后一公里,新增 **P1.5**(suspend 状态迁移 + agent users/identities 过滤,复用现成 sync 通道断流);throttle 真限速 xray 不原生支持,降级为预警。详见设计文档 §1.5。
 - **节点侧实勘**(tky-proxy.svc.plus,`ssh admin@`):systemd 跑 `xray-tcp.service` + `xray-exporter-tcp/xhttp.service` 二实例(`-l 127.0.0.1:8080/8081 -e 127.0.0.1:18080/18081 -p /var/log/xray/access.log`)+ `agent-svc-plus.service`(`/etc/agent/account-agent.yaml`);控制面(accounts/billing/Vault/PG)全在 install.svc.plus。
 
+## 修订(2026-07-11 晚,用户指令)
+
+- **消息队列定型**:用 PG 扩展 **pgmq v1.8.0**(postgresql.svc.plus 镜像内置)建 `billing_events` 队列;accounts 已实现生产者(feat/stripe-billing-p1,优雅降级);本仓 P1.5/P3 接消费者。不引入外部 MQ。
+- **Vault 路径定型**:Stripe 密钥归 `kv/billing-service`(STRIPE_SECRET_KEY / STRIPE_WEBHOOK_SECRET),与 accounts OAuth 密钥分域。
+- P1 实现进度见 accounts [#19](https://github.com/ai-workspace-services/accounts/pull/19)(目录/审计/entitlement sync/PGMQ 生产者,测试全绿)。
+
 ## 遗留待办
 
 - [ ] P0 起排期,产出 PR 后回填本文件的 Related PRs
