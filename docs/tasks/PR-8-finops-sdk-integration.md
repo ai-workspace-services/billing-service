@@ -29,12 +29,12 @@ All results will be converted to `model.CloudVendorCost` and upserted into the d
 
 ## Open Questions & Review
 Before moving to full execution, we need confirmation on:
-1. **GCP Billing Setup**: Confirm that GCP Billing Export to BigQuery is enabled and available, rather than relying strictly on the Cloud Billing API.
-2. **T-2 Time Window**: Confirm that pulling T-2 data is acceptable as a baseline to prevent incomplete billing data.
+1. **GCP Billing Setup**: The user initially requested to directly use the GCP Cloud Billing API instead of BigQuery. However, **GCP Cloud Billing API officially does not support querying cost/spend details programmatically** (it only supports fetching billing account metadata). BigQuery Export is the *only* official way to get granular service-level costs. Awaiting user confirmation to either enable BigQuery export or fall back to retrieving raw total budgets without service-level detail.
+2. **T-2 Time Window**: Defaulting to T-2 lookup to prevent incomplete billing data due to cloud reconciliation delays.
 
 ## Progress
 - [x] Branch `feature/finops-api-integration` created and Draft PR #8 opened.
 - [x] Initial implementation plan documented.
-- [ ] Incorporating user feedback.
+- [ ] Resolving technical blocker regarding GCP API limitations.
 - [ ] Execute SDK integration and configurations.
 - [ ] Validation and mocking testing.
