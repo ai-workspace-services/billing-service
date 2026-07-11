@@ -46,6 +46,10 @@
 
 用户指令:把多云 FinOps 线([PR#6](https://github.com/ai-workspace-services/billing-service/pull/6) MERGED 表+骨架、[PR#8](https://github.com/ai-workspace-services/billing-service/pull/8) OPEN 真 SDK)并入本规划 → 文档升级为三线 FinOps 全景(收入 Stripe / 用量 xray / 成本 multi-cloud),新增 §0 全景、§2.3 成本侧、F0/F1 分期;FinOps 三云凭据(AWS keys / GCP SA JSON+BQ 三元组 / Azure 四元组)与 Stripe 密钥同归 Vault `kv/billing-service`(§2.2 密钥总表)。成本侧不走 PGMQ(T-2 定时拉取无事件性);F1 出毛利/单位成本报表反哺套餐定价。
 
+## 再扩版(2026-07-12):Open Platform FinOps 总纲入库
+
+用户提供完整 **Cloud-Neutral FinOps Control Plane** 工作流规范(14 Workstream,FINOPS-001~1303,Plan→Estimate→Deploy→Measure→Allocate→Analyze→Optimize 全生命周期,Phase 1-3 交付计划)→ 落库 `docs/open-platform-finops-control-plane.md` 作为总纲,本计费规划降为其早期增量。**增值:§0 现状映射表**(已有资产↔FINOPS 编号):VictoriaMetrics/Grafana ✅已部署、node/process_exporter 🟡tky-proxy 已有、PR#8 = FINOPS-401~403 的 API 版垫脚石(蓝图要求 CUR/Export 文件级,需演进)、无 K8s → OpenCost 后置 / Price Book(304)与 LiteLLM AI 成本(305)提前、Vault kv/billing-service ✅、连接器接口(404)/FOCUS(501)/Cost Warehouse(701)/Cost API(9xx)缺。组织建议:billing-service 保持商业计费域,五个 finops-* 服务另立 open-platform/finops,FinOpsSyncer 成熟后迁 finops-ingestor。
+
 ## 遗留待办
 
 - [ ] P0 起排期,产出 PR 后回填本文件的 Related PRs

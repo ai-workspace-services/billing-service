@@ -5,6 +5,8 @@
 
 ## 0. 全景:三条线的 FinOps 闭环(2026-07-12 扩版)
 
+> **上位蓝图**:本规划是 [Open Platform FinOps · Cloud-Neutral FinOps Control Plane](open-platform-finops-control-plane.md) 的早期增量 —— 收入/用量侧属商业计费域(蓝图外的互补面,经 Revenue-based 分摊与毛利报表相接),成本侧 FinOpsSyncer 是蓝图 Workstream E 的 API 版先行(现状映射见蓝图 §0)。
+
 本规划从"Stripe 订阅打通"扩展为完整 FinOps 视图,三条数据线汇入同一个共享 PG:
 
 | 线 | 内容 | 状态 | 载体 |
