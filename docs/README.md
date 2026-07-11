@@ -5,6 +5,7 @@ This directory holds service-owned documentation for `billing-service`.
 ## 总览
 
 - [design.md](design.md) - 当前实现下的系统设计、主执行流程、幂等约束和模块边界
+- [unified-billing-finops-architecture.md](unified-billing-finops-architecture.md) - 统一架构双平面视图:四域边界(支付/账单/计费/成本)+ 消费者/运营者两个能力面 + 三个闭环
 - [open-platform-finops-control-plane.md](open-platform-finops-control-plane.md) - Open Platform FinOps 总纲:14 Workstream(FINOPS-001~1303)、三阶段交付、现状映射(§0)
 - [stripe-billing-integration-plan.md](stripe-billing-integration-plan.md) - Stripe 订阅/账单/计费打通规划:现状缺口、目标架构、billing_plans 套餐目录、生命周期实勘、P0–P3 分期
 - [tasks/](tasks/README.md) - 任务归档(按 PR 的项目记忆)

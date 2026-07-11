@@ -50,6 +50,10 @@
 
 用户提供完整 **Cloud-Neutral FinOps Control Plane** 工作流规范(14 Workstream,FINOPS-001~1303,Plan→Estimate→Deploy→Measure→Allocate→Analyze→Optimize 全生命周期,Phase 1-3 交付计划)→ 落库 `docs/open-platform-finops-control-plane.md` 作为总纲,本计费规划降为其早期增量。**增值:§0 现状映射表**(已有资产↔FINOPS 编号):VictoriaMetrics/Grafana ✅已部署、node/process_exporter 🟡tky-proxy 已有、PR#8 = FINOPS-401~403 的 API 版垫脚石(蓝图要求 CUR/Export 文件级,需演进)、无 K8s → OpenCost 后置 / Price Book(304)与 LiteLLM AI 成本(305)提前、Vault kv/billing-service ✅、连接器接口(404)/FOCUS(501)/Cost Warehouse(701)/Cost API(9xx)缺。组织建议:billing-service 保持商业计费域,五个 finops-* 服务另立 open-platform/finops,FinOpsSyncer 成熟后迁 finops-ingestor。
 
+## 架构定稿(2026-07-12):双平面统一视图
+
+新增 `docs/unified-billing-finops-architecture.md`:四域边界(支付=Stripe 事实源/计费=用量评率/账单=订阅权益/成本=FinOps warehouse,含 FINOPS-601 口径铁律)+ **消费平面**(订阅者旅程九阶段能力表、对账恒等式"应付=固定费+超额−退款"、用量与扣费同源原则)+ **治理平面**(Plan→Optimize 七环能力表、三闭环:毛利=收入−分摊成本/定价校准=单位成本反哺 billing_plans/催缴=arrears→throttle→suspend→复通)+ 两平面六接点 + 分阶段合并视图。
+
 ## 遗留待办
 
 - [ ] P0 起排期,产出 PR 后回填本文件的 Related PRs
