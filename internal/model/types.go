@@ -66,10 +66,14 @@ type QuotaState struct {
 	RemainingIncludedQuota int64
 	CurrentBalance         float64
 	Arrears                bool
-	ThrottleState          string
-	SuspendState           string
-	LastRatedBucketAt      *time.Time
-	EffectiveAt            time.Time
+	// ArrearsSince marks when Arrears last flipped false->true. It is cleared
+	// (nil) whenever Arrears clears, so it always reflects the length of the
+	// current arrears episode rather than the account's first-ever failure.
+	ArrearsSince      *time.Time
+	ThrottleState     string
+	SuspendState      string
+	LastRatedBucketAt *time.Time
+	EffectiveAt       time.Time
 }
 
 type BillingProfile struct {

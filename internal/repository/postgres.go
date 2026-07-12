@@ -164,16 +164,18 @@ func (p *Postgres) ledgerExists(ctx context.Context, id string) (bool, error) {
 
 func (p *Postgres) GetQuotaState(ctx context.Context, accountUUID string) (*model.QuotaState, error) {
 	const query = `
-		SELECT account_uuid, remaining_included_quota, current_balance, arrears, throttle_state, suspend_state, last_rated_bucket_at, effective_at
+		SELECT account_uuid, remaining_included_quota, current_balance, arrears, arrears_since, throttle_state, suspend_state, last_rated_bucket_at, effective_at
 		FROM account_quota_states
 		WHERE account_uuid = $1`
 	var state model.QuotaState
 	var lastRated sql.NullTime
+	var arrearsSince sql.NullTime
 	err := p.db.QueryRowContext(ctx, query, accountUUID).Scan(
 		&state.AccountUUID,
 		&state.RemainingIncludedQuota,
 		&state.CurrentBalance,
 		&state.Arrears,
+		&arrearsSince,
 		&state.ThrottleState,
 		&state.SuspendState,
 		&lastRated,
@@ -189,18 +191,23 @@ func (p *Postgres) GetQuotaState(ctx context.Context, accountUUID string) (*mode
 		value := lastRated.Time
 		state.LastRatedBucketAt = &value
 	}
+	if arrearsSince.Valid {
+		value := arrearsSince.Time
+		state.ArrearsSince = &value
+	}
 	return &state, nil
 }
 
 func (p *Postgres) UpsertQuotaState(ctx context.Context, state model.QuotaState) error {
 	const query = `
 		INSERT INTO account_quota_states (
-			account_uuid, remaining_included_quota, current_balance, arrears, throttle_state, suspend_state, last_rated_bucket_at, effective_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+			account_uuid, remaining_included_quota, current_balance, arrears, arrears_since, throttle_state, suspend_state, last_rated_bucket_at, effective_at
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 		ON CONFLICT (account_uuid) DO UPDATE SET
 			remaining_included_quota = EXCLUDED.remaining_included_quota,
 			current_balance = EXCLUDED.current_balance,
 			arrears = EXCLUDED.arrears,
+			arrears_since = EXCLUDED.arrears_since,
 			throttle_state = EXCLUDED.throttle_state,
 			suspend_state = EXCLUDED.suspend_state,
 			last_rated_bucket_at = EXCLUDED.last_rated_bucket_at,
@@ -211,17 +218,67 @@ func (p *Postgres) UpsertQuotaState(ctx context.Context, state model.QuotaState)
 	if state.LastRatedBucketAt != nil {
 		lastRated = state.LastRatedBucketAt.UTC()
 	}
+	var arrearsSince interface{}
+	if state.ArrearsSince != nil {
+		arrearsSince = state.ArrearsSince.UTC()
+	}
 	_, err := p.db.ExecContext(ctx, query,
 		state.AccountUUID,
 		state.RemainingIncludedQuota,
 		state.CurrentBalance,
 		state.Arrears,
+		arrearsSince,
 		state.ThrottleState,
 		state.SuspendState,
 		lastRated,
 		state.EffectiveAt.UTC(),
 	)
 	return err
+}
+
+// ListArrearsAccounts returns every account currently flagged in arrears
+// that has not yet been suspended, for the dunning sweep (SuspendSyncer) to
+// evaluate against the configured grace threshold.
+func (p *Postgres) ListArrearsAccounts(ctx context.Context) ([]model.QuotaState, error) {
+	const query = `
+		SELECT account_uuid, remaining_included_quota, current_balance, arrears, arrears_since, throttle_state, suspend_state, last_rated_bucket_at, effective_at
+		FROM account_quota_states
+		WHERE arrears = true AND suspend_state <> 'suspended'`
+	rows, err := p.db.QueryContext(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var states []model.QuotaState
+	for rows.Next() {
+		var state model.QuotaState
+		var lastRated sql.NullTime
+		var arrearsSince sql.NullTime
+		if err := rows.Scan(
+			&state.AccountUUID,
+			&state.RemainingIncludedQuota,
+			&state.CurrentBalance,
+			&state.Arrears,
+			&arrearsSince,
+			&state.ThrottleState,
+			&state.SuspendState,
+			&lastRated,
+			&state.EffectiveAt,
+		); err != nil {
+			return nil, err
+		}
+		if lastRated.Valid {
+			value := lastRated.Time
+			state.LastRatedBucketAt = &value
+		}
+		if arrearsSince.Valid {
+			value := arrearsSince.Time
+			state.ArrearsSince = &value
+		}
+		states = append(states, state)
+	}
+	return states, rows.Err()
 }
 
 func (p *Postgres) GetBillingProfile(ctx context.Context, accountUUID string) (*model.BillingProfile, error) {
