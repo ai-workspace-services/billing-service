@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/joho/godotenv"
 )
 
 type ExporterSource struct {
@@ -51,6 +53,10 @@ type Config struct {
 	AzureClientID       string
 	AzureClientSecret   string
 	AzureSubscriptionID string
+
+	// OpenCost is an allocation source, never an authoritative cloud bill.
+	OpenCostEndpoint  string
+	OpenCostAuthToken string
 }
 
 type rawExporterSource struct {
@@ -63,6 +69,16 @@ type rawExporterSource struct {
 }
 
 func Load() (Config, error) {
+	appEnv := strings.TrimSpace(os.Getenv("APP_ENV"))
+	if appEnv == "" {
+		appEnv = "dev"
+	}
+
+	// Progressively load env files, allowing overrides from more specific ones.
+	_ = godotenv.Load(".env." + appEnv + ".local")
+	_ = godotenv.Load(".env." + appEnv)
+	_ = godotenv.Load() // fallback to .env
+
 	imageRef := strings.TrimSpace(os.Getenv("IMAGE"))
 	imageTag, imageCommit, imageVersion := parseImageRef(imageRef)
 	cfg := Config{
@@ -92,6 +108,9 @@ func Load() (Config, error) {
 		AzureClientID:       strings.TrimSpace(os.Getenv("AZURE_CLIENT_ID")),
 		AzureClientSecret:   strings.TrimSpace(os.Getenv("AZURE_CLIENT_SECRET")),
 		AzureSubscriptionID: strings.TrimSpace(os.Getenv("AZURE_SUBSCRIPTION_ID")),
+
+		OpenCostEndpoint:  strings.TrimRight(strings.TrimSpace(os.Getenv("OPENCOST_ENDPOINT")), "/"),
+		OpenCostAuthToken: strings.TrimSpace(os.Getenv("OPENCOST_AUTH_TOKEN")),
 	}
 	if cfg.ListenAddr == "" {
 		cfg.ListenAddr = ":8081"
