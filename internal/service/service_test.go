@@ -111,6 +111,16 @@ func (m *memoryRepo) UpsertQuotaState(_ context.Context, state model.QuotaState)
 	return nil
 }
 
+func (m *memoryRepo) ListArrearsAccounts(_ context.Context) ([]model.QuotaState, error) {
+	var states []model.QuotaState
+	for _, quota := range m.quotas {
+		if quota.Arrears && quota.SuspendState != "suspended" {
+			states = append(states, quota)
+		}
+	}
+	return states, nil
+}
+
 func (m *memoryRepo) GetBillingProfile(_ context.Context, accountUUID string) (*model.BillingProfile, error) {
 	if profile, ok := m.profiles[accountUUID]; ok {
 		copy := profile

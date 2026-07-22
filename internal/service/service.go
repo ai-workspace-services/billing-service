@@ -344,8 +344,13 @@ func (s *Service) processSample(ctx context.Context, snapshot model.Snapshot, sa
 		quota.Arrears = quota.CurrentBalance < 0
 		if quota.Arrears {
 			quota.ThrottleState = "throttled"
+			if quota.ArrearsSince == nil {
+				since := snapshot.CollectedAt.UTC()
+				quota.ArrearsSince = &since
+			}
 		} else {
 			quota.ThrottleState = "normal"
+			quota.ArrearsSince = nil
 		}
 		quota.EffectiveAt = snapshot.CollectedAt.UTC()
 		lastRated := minuteStart
