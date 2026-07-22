@@ -12,4 +12,5 @@
 
 | 日期 | 任务 | 状态 | 关联 |
 |---|---|---|---|
+| 2026-07-12 | [Stripe 计费 P1.5(arrears 宽限期 → suspend 状态迁移)](2026-07-12-stripe-billing-p15.md) | ⏳ 待合并(本 PR) | 本仓本 PR;accounts [#30](https://github.com/ai-workspace-services/accounts/pull/30) |
 | 2026-07-11 | [Stripe 订阅/账单/计费打通规划](2026-07-11-stripe-billing-plan.md) | 📋 规划定稿待排期 | [stripe-billing-integration-plan.md](../stripe-billing-integration-plan.md) |

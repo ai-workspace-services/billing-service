@@ -3,6 +3,20 @@
 > 目标:把 Stripe 订阅收款、accounts 的订阅记录、billing-service 的计量/配额三个世界连成一条可运营的闭环,且**价格/套餐/权益调整全部数据驱动**(改表,不改代码、不重部署)。
 > 最后更新:2026-07-11 · 状态:规划定稿待排期
 
+## 0. 全景:三条线的 FinOps 闭环(2026-07-12 扩版)
+
+> **上位蓝图**:本规划是 [Open Platform FinOps · Cloud-Neutral FinOps Control Plane](open-platform-finops-control-plane.md) 的早期增量 —— 收入/用量侧属商业计费域(蓝图外的互补面,经 Revenue-based 分摊与毛利报表相接),成本侧 FinOpsSyncer 是蓝图 Workstream E 的 API 版先行(现状映射见蓝图 §0)。
+
+本规划从"Stripe 订阅打通"扩展为完整 FinOps 视图,三条数据线汇入同一个共享 PG:
+
+| 线 | 内容 | 状态 | 载体 |
+|---|---|---|---|
+| **收入侧** | Stripe 订阅/账单 → 订阅记录 → 权益(entitlement) | P0 已合,P1 = accounts#19 | accounts(stripe.go / billing_plans / PGMQ 生产者) |
+| **用量侧** | xray 流量 → 计量 → 评率/配额扣减 | 已上线运行 | xray-exporter → billing-service collect-and-rate |
+| **成本侧** | AWS/GCP/Azure 基础设施成本同步 | PR#6 已合(表+骨架),**PR#8 实施中**(真 SDK) | billing-service FinOpsSyncer → `cloud_vendor_costs` |
+
+三线相交产生运营视角:**毛利 = Stripe 收入 −(多云成本 按用量/节点分摊)**;成本异常审计(AI auditing,cloud_vendor_costs 表注释即此意);定价校准(套餐 included_quota 的单位成本依据)。
+
 ## 1. 现状盘点(2026-07-11 实勘)
 
 ### 已有(七成骨架)
@@ -91,7 +105,45 @@
 - **Stripe** = 钱的事实源(价格、发票、退款都以它为准)。
 - **accounts** = 订阅与权益的事实源,唯一持有 Stripe API key,唯一写 `subscriptions`/`account_billing_profiles` 的服务。
 - **billing-service** = 用量的事实源,只读 profiles、只写用量/账本/配额消耗;**不碰 Stripe**。
-- 联动通道 = 共享 PG 表(现状即如此),不引入消息队列。
+- 联动通道 = **共享 PG 表 + PGMQ 消息队列**(2026-07-11 修订):状态类数据(profiles/quota)走共享表;生命周期通知走 PGMQ `billing_events` 队列(扩展 **pgmq v1.8.0**,postgresql.svc.plus 运行时镜像内置,与 pgvector/pg_jieba 同装)。不引入外部 MQ 组件 —— 队列就在同一个 PG 里。
+
+### 2.1 PGMQ `billing_events` 队列(已实现,accounts feat/stripe-billing-p1)
+
+- **生产者**:accounts 在 entitlement sync 各点位发布紧凑事件:`subscription_activated` / `subscription_updated` / `invoice_paid` / `payment_failed` / `subscription_deleted` / `trial_provisioned`,payload 含 userId/planId/priceId/externalId/occurredAt。
+- **降级策略**:启动时 `EnsureBillingEventQueue`(检测/尝试 `CREATE EXTENSION pgmq` + `pgmq.create('billing_events')`);扩展不可用则发布静默 no-op,webhook 主流程永不因队列失败;去重重放不重复发布。线上 accounts 库 pgmq **available 未安装**,operator 需一次 `CREATE EXTENSION pgmq`(superuser)。
+- **消费者**(本仓,P1.5/P3 接入):`pgmq.read('billing_events', vt, qty)` + 处理后 `pgmq.delete/archive`;用于 arrears 升级触发、对账增量、催缴通知,替代轮询。消费失败消息按 pgmq 可见性超时自动重投。
+
+### 2.2 密钥存储(2026-07-11 修订)
+
+Stripe 密钥的 Vault source-of-truth 归**本服务路径 `kv/billing-service`**(与 accounts 的 OAuth 密钥 kv/accounts.svc.plus 分域):
+
+| Vault `kv/billing-service` 字段 | 用途 | 同步到 |
+|---|---|---|
+| `STRIPE_SECRET_KEY` | Stripe API key(accounts 容器 env 消费) | GH secret `STRIPE_SECRET_KEY`(accounts 仓) |
+| `STRIPE_WEBHOOK_SECRET` | webhook 签名校验 | GH secret `STRIPE_WEBHOOK_SECRET`(accounts 仓) |
+
+`STRIPE_ALLOWED_PRICE_IDS` 非密钥(repo var,且 P1 后目录为准仅作 bootstrap 兜底),不入 Vault。
+
+**FinOps 多云凭据同归 `kv/billing-service`**(2026-07-12,配套 PR#8):
+
+| Vault `kv/billing-service` 字段 | 云 | 用途 |
+|---|---|---|
+| `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | AWS | Cost Explorer `GetCostAndUsage`(建议最小权限:`ce:GetCostAndUsage` 只读 IAM) |
+| `GCP_CREDENTIALS_JSON` | GCP | BigQuery 账单导出查询(SA 只读 `bigquery.jobs.create`+dataset viewer) |
+| `GCP_BILLING_PROJECT` / `GCP_BILLING_DATASET` / `GCP_BILLING_TABLE` | GCP | 非密钥,但与凭据同处便于整包同步 |
+| `AZURE_TENANT_ID` / `AZURE_CLIENT_ID` / `AZURE_CLIENT_SECRET` / `AZURE_SUBSCRIPTION_ID` | Azure | Consumption UsageDetails(Reader on subscription) |
+
+同步链:Vault → billing-service 部署 env(billing-service 的部署链待接线,见 §4 F0)。
+
+### 2.3 成本侧:多云 FinOps 同步(并入 2026-07-12)
+
+- **已合**(PR#6):`cloud_vendor_costs` 表(provider/account_id/service_name/region/时间窗/cost_amount/currency/usage_quantity,时间+provider 索引)+ `FinOpsSyncer` 守护协程骨架(随 billing-service 主进程启动)。
+- **实施中**(PR#8,分支 `feature/finops-api-integration`):真 SDK 集成 ——
+  - AWS:`costexplorer.GetCostAndUsage` 按 SERVICE 分组,unblended amortized
+  - GCP:BigQuery SDK 查账单导出 dataset(已决策:走 BigQuery export 而非 Cloud Billing API,导出成本可忽略)
+  - Azure:`armconsumption.UsageDetailsClient` 按日用量
+  - **T-2 窗口**(取两天前数据,规避云商账单结算延迟)已决策
+- **与收入/用量侧的接点**(后续 F1):`cloud_vendor_costs` × `billing_ledger`/`traffic_minute_buckets` 出毛利与单位成本报表;不走 PGMQ(定时 T-2 拉取模型,无事件性)。
 
 ## 3. 灵活性设计(“方便灵活调整”的落点)
 
@@ -170,6 +222,19 @@ CREATE TABLE billing_plans (
 - [ ] 升级/降级:`POST /api/auth/subscriptions/change`,Stripe subscription item 替换,proration 策略 = `create_prorations`(升级即时,降级期末)
 - [ ] console:定价页读 `/api/billing/plans`;`panel/subscription` 补退款/变更入口
 - [ ] 注销联动(产品决策):`pending_cancellation` → 订阅期末终止 → 30 天删除冷静期;paygo 余额原路退
+
+### F0 · 成本侧落地(并行线,不阻塞 P 线)
+
+- [ ] 评审合并 **PR#8**(多云 SDK 集成;注意 go.mod 膨胀 +67 依赖属预期,SDK 家族使然)
+- [ ] 三云凭据入 Vault `kv/billing-service`(字段见 §2.2)→ billing-service 部署 env 接线(billing-service 自身的部署链/pipeline 需先盘点,当前无 playbooks role)
+- [ ] GCP 侧前置:开 BigQuery 账单导出(已决策);AWS/Azure 建最小权限只读主体
+- [ ] 验证:FinOpsSyncer T-2 拉取三云数据落 `cloud_vendor_costs`
+
+### F1 · 成本×收入对账报表(0.5~1 周,依赖 F0 + P1 上线)
+
+- [ ] 毛利视图:Stripe 收入(subscriptions/ledger)− 多云成本(cloud_vendor_costs),按月/按 provider
+- [ ] 单位成本:cost / rated_bytes,给套餐定价(billing_plans included_quota)校准依据
+- [ ] admin 端点或直接 SQL 报表(console 面板可选后置)
 
 ### P3 · 对账与可观测(0.5 周,billing-service 侧)
 

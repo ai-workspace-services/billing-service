@@ -41,10 +41,14 @@ func main() {
 	)
 	svc.Start(ctx)
 
-	// Initialize and start FinOps Syncer (Cloud Billing)
 	logger := slog.Default()
+
+	// Initialize and start FinOps Syncer (Cloud Billing)
 	finopsSyncer := service.NewFinOpsSyncer(repo, logger, cfg)
 	go finopsSyncer.Start(ctx)
+
+	suspendSyncer := service.NewSuspendSyncer(repo, cfg.ArrearsSuspendThreshold, cfg.ArrearsSweepInterval, logger)
+	go suspendSyncer.Start(ctx)
 
 	server := &http.Server{
 		Addr:    cfg.ListenAddr,
