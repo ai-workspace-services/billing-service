@@ -42,6 +42,7 @@ jobs:
         with:
           url: https://vault.svc.plus
           role: github-actions-billing-service-${{ needs.prep.outputs.deployment_environment }}
+          jwtGithubAudience: vault
           method: jwt
           path: jwt
 
