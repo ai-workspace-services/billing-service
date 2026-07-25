@@ -64,7 +64,14 @@ jobs:
           images: ghcr.io/${{ github.repository }}
           tags: |
             type=ref,event=tag
-            type=ref,event=branch
+            # event=branch 不加 enable 会在 main 上产出一个 :main tag, 与
+            # latest 语义重复; 真正需要分支名做 tag 的只有 release/*。
+            type=ref,event=branch,enable=${{ startsWith(github.ref, 'refs/heads/release/') }}
+            # 这一条原本缺失, 于是 main push 只推 :main 和 :sha-<full>, 从不推
+            # :latest —— 而 gitops 的 compose/web-saas/.env.uat 引用的正是
+            # ghcr.io/.../billing-service:latest, tag 对不上, Doco-CD 拉不到。
+            # 契约见 platform-ops-toolkit docs/domains/IMAGE-TAG-CONTRACT.md。
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
             type=sha,format=long
 
       - name: Build and push
