@@ -30,13 +30,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # 不写 path: —— 用 vault-action 默认的 jwt mount。
+      #
+      # 这里原本是 path: github-actions, 但 Vault 上的 JWT auth 实际挂在 jwt
+      # (见 platform-ops-toolkit docs/tasks/*.sh 里的 auth/jwt/role/...),
+      # 其余四个业务仓与 platform-ops / playbooks 也都用默认值。指向一个不
+      # 存在的 mount 换不到任何 token, 表现为 403 permission denied ——
+      # 与"role 不存在"和"绑定不匹配"完全同形, 很容易误判成权限配置问题。
       - name: Authenticate to Vault
-        uses: hashicorp/vault-action@v3
+        uses: hashicorp/vault-action@v4
         with:
           url: https://vault.svc.plus
           role: github-actions-billing-service-${{ needs.prep.outputs.deployment_environment }}
           method: jwt
-          path: github-actions
+          path: jwt
 
       - name: Set Up Docker Buildx
         uses: docker/setup-buildx-action@v3
