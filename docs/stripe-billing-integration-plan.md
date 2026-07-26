@@ -1,8 +1,9 @@
 # Stripe 订阅 · 账单 · 计费打通规划
 
 > 目标:把 Stripe 订阅收款、accounts 的订阅记录、billing-service 的计量/配额三个世界连成一条可运营的闭环,且**价格/套餐/权益调整全部数据驱动**(改表,不改代码、不重部署)。
-> 最后更新:**2026-07-22** · 状态:**P0 / P1 / P1.5 / F0 已上线,P2 / P3 / F1 未开工**
-> 📌 **执行状态、运行时事实与已知欠账以 [docs/tasks/2026-07-11-stripe-billing-plan.md](tasks/2026-07-11-stripe-billing-plan.md) 为准**(交接文档)。本文是设计与分期的详细依据。
+> 最后更新:**2026-07-22** · 状态:**M1(P0/P1/P1.5/F0)已上线闭环 · M2(P2/P3/F1)待开工**
+> 🎯 **下一里程碑 M2 从 [§4.5](#45-下一里程碑m2--p2--p3--f1--开工前必须先解决的问题) 读起** —— 那里列了 4 个开工前必须先拍板的阻塞项(退款执行权归属矛盾、P2/P3 依赖倒置、与 accounts 注销规划重复、reconcile 命名冲突)与建议执行顺序。
+> 📌 执行状态、运行时事实与已知欠账以 [docs/tasks/2026-07-11-stripe-billing-plan.md](tasks/2026-07-11-stripe-billing-plan.md) 为准(交接文档)。本文是设计与分期的详细依据。
 
 ## 0. 全景:三条线的 FinOps 闭环(2026-07-12 扩版)
 
@@ -248,6 +249,64 @@ CREATE TABLE billing_plans (
 - [ ] billing-service 新增 `POST /v1/jobs/reconcile-stripe`:拉 Stripe subscriptions/invoices 与本地 `subscriptions`/`billing_ledger` 比对,出 drift 报告
 - [ ] `GET /v1/usage/window?account&from&to` 内部端点(供退款判定与客服查询)
 - [ ] 指标:webhook 失败率、entitlement sync 滞后、arrears 账户数;接现有 VictoriaMetrics
+
+## 4.5 下一里程碑(M2 = P2 + P3 + F1)—— 开工前必须先解决的问题
+
+> 2026-07-22 增补。P0/P1/P1.5/F0 构成的 M1(收入→权益→用量→欠费执行)已闭环上线。
+> M2 的目标是**自助化与可对账**。但 §4 里 P2/P3/F1 的条目是立项期写的,直接照着开工会撞上下面 4 个问题 —— **这些不是实现细节,是需要先拍板的阻塞项**。
+
+### ⛔ 阻塞 1:退款的执行权归属,三处说法互相矛盾(必须先定)
+
+| 出处 | 说法 |
+|---|---|
+| 本文 §2 职责边界 | accounts = **唯一持有 Stripe API key**;billing-service **不碰 Stripe** |
+| 本文 §4 P2 第 1 条 | accounts `POST /api/auth/subscriptions/refund` → **直接调 Stripe refund API** |
+| accounts `docs/tasks/2026-07-14-self-service-recovery-and-deletion.md` 决策 #3 | 注销退款「**由 billing-service / 运营执行**;accounts 不直接调 Stripe refund」 |
+
+三者无法同时成立:**billing-service 不碰 Stripe,就不可能由它执行 Stripe refund**。可选方案:
+
+- **方案 A(推荐,与既有架构一致)**:退款动作统一由 accounts 执行(它已是唯一 Stripe API 持有者);billing-service 只提供退款判定所需的用量数据。accounts 那份注销文档的决策 #3 需相应修订为「**由运营在 admin 后台触发,accounts 执行**」。
+- **方案 B**:一切退款只记录待退,**由运营在 Stripe Dashboard 人工退**。自动化程度低,但资金动作完全离开自动流程,审计上最保守。
+- **方案 C**:给 billing-service 开 Stripe 只写 refund 的能力 —— **需推翻 §2 职责边界**,不建议(两个服务持有 Stripe 凭据会让"钱的事实源"责任模糊)。
+
+拍板前 P2 的退款项、accounts 的自助注销退款项都无法开工。
+
+### ⛔ 阻塞 2:P2 依赖 P3,当前排序是反的
+
+P2 的 7 天低用量退款判定需要「窗口内用量」,而提供该数据的 `GET /v1/usage/window` 排在 **P3**。按 §4 的字面顺序开工会立刻卡住。
+
+**建议**:把 P3 的 `GET /v1/usage/window` 提到 M2 的第一项(它是纯读端点,工作量小、无依赖),再做 P2 退款。
+
+### ⚠️ 阻塞 3:P2「注销联动」与 accounts 侧已锁的自助注销是同一件事
+
+accounts 已就自助注销**拍板决策并写好实现计划**(软删 `pending_deletion` + 30 天冷静期 + MFA 校验 + `cancel_at_period_end` + 发 `billing_events` 记录待退),见 accounts `docs/tasks/2026-07-14-self-service-recovery-and-deletion.md` §待实现 B。
+
+**P2 不应重新规划这一项**,应改为引用该文档,本文只保留 billing-service 侧的接口义务(即:提供待退金额的用量/余额查询,以及退款执行的落账)。两边同时规划会产生第二份互相漂移的设计。
+
+### ⚠️ 阻塞 4:`reconcile` 命名已被占用,语义不同
+
+本仓**已有** `POST /v1/jobs/reconcile`,但它只是 `RunCollectAndRate(ctx, "reconcile")` 的别名 —— **做的是用量补算,不是 Stripe 对账**。P3 计划新增的 `POST /v1/jobs/reconcile-stripe` 与之仅一词之差、语义完全不同,运维极易误调。
+
+**建议**:P3 的新端点改名为 `POST /v1/jobs/stripe-drift-report`(或把现有的改名为 `/v1/jobs/recollect`),避免两个 reconcile 并存。
+
+### M2 建议执行顺序
+
+```
+① 拍板阻塞 1(退款执行权)          ← 纯决策,不写代码
+② P3-a: GET /v1/usage/window       ← 纯读端点,解开 P2 依赖
+③ P2-a: 7 天低用量退款             ← 依赖 ①②
+④ P2-b: 升降级 proration           ← 独立,可与 ③ 并行
+⑤ P2-c: console 定价页             ← 依赖 billing_plans 已录入付费套餐(见 §6 前置)
+⑥ 注销联动                          ← 归 accounts 主导,本仓配合退款落账
+⑦ P3-b: drift 报告 + 指标           ← 独立
+⑧ F1: 毛利/单位成本报表             ← 依赖 F0 真实数据(凭据接线,见 §4 F0 未完成项)
+```
+
+### M2 的前置条件(不属于开发任务,但不做就卡住)
+
+- **付费套餐尚未录入**:`billing_plans` 目前只有 `TRIAL-7D` / `FREE` 种子。定价页(⑤)和升降级(④)都需要运营先在 admin 后台录入付费套餐 + Stripe Dashboard 建对应 Products/Prices。
+- **F0 三云凭据接线未确认**:F1(⑧)依赖 `cloud_vendor_costs` 有真实数据。需先核实 billing-service 部署 env 是否已注入三云凭据。
+- **Stripe 仍在 sandbox**:退款/proration 这类资金动作建议在 sandbox 全量回归后再切 live(切换 SOP 见交接文档 §三.3)。
 
 ## 5. 决策(2026-07-11 已拍板)
 
