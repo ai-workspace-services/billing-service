@@ -1,7 +1,8 @@
 # Stripe 订阅 · 账单 · 计费打通规划
 
 > 目标:把 Stripe 订阅收款、accounts 的订阅记录、billing-service 的计量/配额三个世界连成一条可运营的闭环,且**价格/套餐/权益调整全部数据驱动**(改表,不改代码、不重部署)。
-> 最后更新:2026-07-11 · 状态:规划定稿待排期
+> 最后更新:**2026-07-22** · 状态:**P0 / P1 / P1.5 / F0 已上线,P2 / P3 / F1 未开工**
+> 📌 **执行状态、运行时事实与已知欠账以 [docs/tasks/2026-07-11-stripe-billing-plan.md](tasks/2026-07-11-stripe-billing-plan.md) 为准**(交接文档)。本文是设计与分期的详细依据。
 
 ## 0. 全景:三条线的 FinOps 闭环(2026-07-12 扩版)
 
@@ -11,9 +12,9 @@
 
 | 线 | 内容 | 状态 | 载体 |
 |---|---|---|---|
-| **收入侧** | Stripe 订阅/账单 → 订阅记录 → 权益(entitlement) | P0 已合,P1 = accounts#19 | accounts(stripe.go / billing_plans / PGMQ 生产者) |
-| **用量侧** | xray 流量 → 计量 → 评率/配额扣减 | 已上线运行 | xray-exporter → billing-service collect-and-rate |
-| **成本侧** | AWS/GCP/Azure 基础设施成本同步 | PR#6 已合(表+骨架),**PR#8 实施中**(真 SDK) | billing-service FinOpsSyncer → `cloud_vendor_costs` |
+| **收入侧** | Stripe 订阅/账单 → 订阅记录 → 权益(entitlement) | ✅ 已上线(P0 + P1 = accounts#19,P1.5 = accounts#30 + 本仓#11) | accounts(stripe.go / billing_plans / PGMQ 生产者) |
+| **用量侧** | xray 流量 → 计量 → 评率/配额扣减 | ✅ 已上线运行 | xray-exporter → billing-service collect-and-rate |
+| **成本侧** | AWS/GCP/Azure 基础设施成本同步 | ✅ 代码已合并(PR#6 表+骨架,PR#8 真 SDK);⚠️ 三云凭据接线待核实 | billing-service FinOpsSyncer → `cloud_vendor_costs` |
 
 三线相交产生运营视角:**毛利 = Stripe 收入 −(多云成本 按用量/节点分摊)**;成本异常审计(AI auditing,cloud_vendor_costs 表注释即此意);定价校准(套餐 included_quota 的单位成本依据)。
 
@@ -111,7 +112,8 @@
 
 - **生产者**:accounts 在 entitlement sync 各点位发布紧凑事件:`subscription_activated` / `subscription_updated` / `invoice_paid` / `payment_failed` / `subscription_deleted` / `trial_provisioned`,payload 含 userId/planId/priceId/externalId/occurredAt。
 - **降级策略**:启动时 `EnsureBillingEventQueue`(检测/尝试 `CREATE EXTENSION pgmq` + `pgmq.create('billing_events')`);扩展不可用则发布静默 no-op,webhook 主流程永不因队列失败;去重重放不重复发布。线上 accounts 库 pgmq **available 未安装**,operator 需一次 `CREATE EXTENSION pgmq`(superuser)。
-- **消费者**(本仓,P1.5/P3 接入):`pgmq.read('billing_events', vt, qty)` + 处理后 `pgmq.delete/archive`;用于 arrears 升级触发、对账增量、催缴通知,替代轮询。消费失败消息按 pgmq 可见性超时自动重投。
+- **消费者**(本仓,原计划 P1.5/P3 接入):`pgmq.read('billing_events', vt, qty)` + 处理后 `pgmq.delete/archive`;用于 arrears 升级触发、对账增量、催缴通知,替代轮询。消费失败消息按 pgmq 可见性超时自动重投。
+  > ⚠️ **实际未实现(2026-07-22 核对)**:P1.5 落地时走了**直接轮询 `account_quota_states.arrears_since`** 的方案(`internal/service/suspend.go`),本仓代码中 `pgmq`/`billing_events` 零引用。队列目前只有生产者、无消费者。P3 开工时需先决定:接入队列,还是维持轮询并撤下队列。
 
 ### 2.2 密钥存储(2026-07-11 修订)
 
@@ -190,31 +192,35 @@ CREATE TABLE billing_plans (
 
 ### P0 · 让 Stripe 在 prod 活过来(半天,复用 OAuth 部署链路)
 
-- [ ] Stripe Dashboard(先 test mode):建 Products/Prices;Webhook endpoint = `https://accounts.svc.plus/api/billing/stripe/webhook`,拿 `whsec_*`
-- [ ] Vault `kv/accounts.svc.plus` 增:`STRIPE_SECRET_KEY`、`STRIPE_WEBHOOK_SECRET` → 同步 GH secrets
-- [ ] playbooks role:`app.env.j2` + `defaults/main.yml` + `target.yml` lineinfile 增 `STRIPE_*` 三变量(完全照抄 OAuth 那次的模式,含存量主机 lineinfile)
-- [ ] accounts `pipeline.yml` deploy env 透传
-- [ ] 验证:`stripe listen --forward-to` 本地回归 + prod test-mode 全流程(checkout → webhook → subscriptions 落库)
+> ✅ **已上线(sandbox 模式)** — accounts #18/#20/#22 + playbooks #121。密钥改为 CI 经 Vault OIDC 直读 `kv/billing-service`,由仓库变量 `STRIPE_MODE` 整对切换 SANDBOX_*/PROD_*(比原计划的手工同步 GH secrets 更进一步)。
+- [x] Stripe Dashboard(先 test mode):建 Products/Prices;Webhook endpoint = `https://accounts.svc.plus/api/billing/stripe/webhook`,拿 `whsec_*`
+- [x] Vault `kv/accounts.svc.plus` 增:`STRIPE_SECRET_KEY`、`STRIPE_WEBHOOK_SECRET` → 同步 GH secrets
+- [x] playbooks role:`app.env.j2` + `defaults/main.yml` + `target.yml` lineinfile 增 `STRIPE_*` 三变量(完全照抄 OAuth 那次的模式,含存量主机 lineinfile)
+- [x] accounts `pipeline.yml` deploy env 透传
+- [x] 验证:`stripe listen --forward-to` 本地回归 + prod test-mode 全流程(checkout → webhook → subscriptions 落库)
 
 ### P1.5 · 欠费执行面(0.5 周,接在 P1 后)
 
-- [ ] billing-service:arrears 持续超阈值(14 天,配置化)→ `suspend_state='suspended'` 状态迁移
-- [ ] accounts:`listAgentUsers` + `internalNetworkIdentities` 排除 `suspend_state='suspended'` 账号(join quota_states)→ agent 下次 sync 即断流
-- [ ] 恢复路径:invoice.paid / 手动清欠 → `suspend_state='active'` → 下次 sync 恢复接入
+> ✅ **已上线** — accounts #30(agent sync 断流 + 人工清欠 admin 端点)+ 本仓 #11(`SuspendSyncer` 宽限扫描)。
+> ⚠️ 最后一项 console 提示与催缴邮件**未实现**;throttle 因 xray 不支持 per-user 限速,降级为纯状态标记。
+- [x] billing-service:arrears 持续超阈值(14 天,配置化)→ `suspend_state='suspended'` 状态迁移
+- [x] accounts:`listAgentUsers` + `internalNetworkIdentities` 排除 `suspend_state='suspended'` 账号(join quota_states)→ agent 下次 sync 即断流
+- [x] 恢复路径:invoice.paid / 手动清欠 → `suspend_state='active'` → 下次 sync 恢复接入
 - [ ] console:arrears/throttled 状态提示 + 催缴邮件(SMTP 已有)
 
 ### P1 · 打通订阅→权益闭环(核心,1~2 周)
 
-- [ ] `billing_plans` 表 + store 层 + 种子数据(TRIAL-7D、首批付费套餐)+ admin CRUD
-- [ ] `stripe_webhook_events` 表(event_id 去重、payload 审计、处理状态),webhook 先落事件再处理
-- [ ] **entitlement sync**(accounts 内,webhook 驱动):
+> ✅ **已上线** — accounts #19(目录/审计去重/entitlement sync/PGMQ 生产者,测试全绿)。
+- [x] `billing_plans` 表 + store 层 + 种子数据(TRIAL-7D、首批付费套餐)+ admin CRUD
+- [x] `stripe_webhook_events` 表(event_id 去重、payload 审计、处理状态),webhook 先落事件再处理
+- [x] **entitlement sync**(accounts 内,webhook 驱动):
   - `customer.subscription.created/updated` → 按 plan 写 `account_billing_profiles`
   - `invoice.paid` → 重置 `account_quota_states.remaining_included_quota`、清 `arrears`
   - `invoice.payment_failed` → `arrears=true`,N 次后 `throttle_state/suspend_state` 升级(阈值进配置)
   - `customer.subscription.deleted` / trial 过期 → 降回 free 档案
-- [ ] checkout 校验改读 `billing_plans`,下线 `STRIPE_ALLOWED_PRICE_IDS`
-- [ ] trial→付费转换:新订阅生效时把 trial 记录标记 `superseded`
-- [ ] 测试:webhook 全事件表驱动测试 + 幂等重放测试
+- [x] checkout 校验改读 `billing_plans`,下线 `STRIPE_ALLOWED_PRICE_IDS`
+- [x] trial→付费转换:新订阅生效时把 trial 记录标记 `superseded`
+- [x] 测试:webhook 全事件表驱动测试 + 幂等重放测试
 
 ### P2 · 自助与政策落地(1 周)
 
@@ -225,7 +231,8 @@ CREATE TABLE billing_plans (
 
 ### F0 · 成本侧落地(并行线,不阻塞 P 线)
 
-- [ ] 评审合并 **PR#8**(多云 SDK 集成;注意 go.mod 膨胀 +67 依赖属预期,SDK 家族使然)
+> 🟡 **代码已合并,凭据接线待核实** — PR#8 已 MERGED;下面后三项(Vault 凭据 / GCP BQ 导出 / 拉取验证)**尚未确认完成**,接手需先核实 billing-service 部署 env 是否已注入三云凭据。
+- [x] 评审合并 **PR#8**(多云 SDK 集成;注意 go.mod 膨胀 +67 依赖属预期,SDK 家族使然)
 - [ ] 三云凭据入 Vault `kv/billing-service`(字段见 §2.2)→ billing-service 部署 env 接线(billing-service 自身的部署链/pipeline 需先盘点,当前无 playbooks role)
 - [ ] GCP 侧前置:开 BigQuery 账单导出(已决策);AWS/Azure 建最小权限只读主体
 - [ ] 验证:FinOpsSyncer T-2 拉取三云数据落 `cloud_vendor_costs`

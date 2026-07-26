@@ -13,7 +13,7 @@
 
 | FINOPS 任务 | 现状 | 资产/差距 |
 |---|---|---|
-| FINOPS-401/402/403(云账单) | 🟡 **API 版先行**:billing-service PR#6(已合,`cloud_vendor_costs` 表+FinOpsSyncer)+ PR#8(实施中:AWS CostExplorer API / GCP BigQuery 查询 / Azure Consumption API,T-2 窗口) | 蓝图要求 **CUR/Export 文件级**接入(S3/BQ export/Storage export)——PR#8 的 API 路线是 MVP 垫脚石,Phase 1/2 需演进为 export 路线(资源级明细 + Credit/Refund + 摊销口径),两条路线数据可共存对账 |
+| FINOPS-401/402/403(云账单) | 🟡 **API 版先行**:billing-service PR#6(已合,`cloud_vendor_costs` 表+FinOpsSyncer)+ **PR#8 已合并**(AWS CostExplorer API / GCP BigQuery 查询 / Azure Consumption API,T-2 窗口);⚠️ 三云凭据接线待核实,代码在但可能尚未拉到真实数据 | 蓝图要求 **CUR/Export 文件级**接入(S3/BQ export/Storage export)——PR#8 的 API 路线是 MVP 垫脚石,Phase 1/2 需演进为 export 路线(资源级明细 + Credit/Refund + 摊销口径),两条路线数据可共存对账 |
 | FINOPS-404(连接器接口) | 🔴 缺 | PR#8 是硬编码三云;`list_accounts/sync_cost/.../validate_credentials` 统一接口待抽象;凭证 Vault 已定 `kv/billing-service`(✅ 符合 FINOPS-1201) |
 | FINOPS-202(VictoriaMetrics) | ✅ **已部署**:install.svc.plus 跑着 xstream_victoriametrics/victorialogs/victoriatraces + Grafana | vmagent scrape OpenCost 待接(依赖 K8s) |
 | FINOPS-201/203/204(OpenCost/K8s) | 🔴 无 K8s 集群 | 当前 estate 全是 VPS/裸金属 docker compose —— **对 svc.plus 而言 Workstream D(非 K8s)优先于 C**,蓝图 Phase 1 的 OpenCost 项在本环境后置 |
