@@ -15,6 +15,9 @@ elif [[ "${GITHUB_REF:-}" == refs/heads/main || "${GITHUB_REF:-}" == refs/heads/
 elif [[ "${GITHUB_REF:-}" == refs/tags/v* ]]; then
   deploy_env="prod"
   push_image="true"
+elif [[ "${GITHUB_REF:-}" == refs/tags/daily-build-* ]]; then
+  deploy_env="uat"
+  push_image="true"
 elif [[ "${GITHUB_REF:-}" == refs/tags/* ]]; then
   deploy_env="sit"
   push_image="true"
