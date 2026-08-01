@@ -212,13 +212,7 @@ func (s *Service) collectSource(ctx context.Context, source config.ExporterSourc
 
 func (s *Service) processSnapshot(ctx context.Context, snapshot model.Snapshot, result *model.JobResult) (bool, error) {
 	processedAny := false
-	for _, sample := range snapshot.Samples {
-		if err := validateSample(sample); err != nil {
-			result.Status = "partial"
-			result.Error = joinError(result.Error, err.Error())
-			continue
-		}
-
+	for _, sample := range aggregateSamplesByUUID(snapshot.Samples, result) {
 		processed, err := s.processSample(ctx, snapshot, sample, result)
 		if err != nil {
 			return processedAny, fmt.Errorf("process snapshot %s for %s: %w", snapshot.CollectedAt.UTC().Format(time.RFC3339), sample.UUID, err)
@@ -229,6 +223,52 @@ func (s *Service) processSnapshot(ctx context.Context, snapshot model.Snapshot, 
 		}
 	}
 	return processedAny, nil
+}
+
+// aggregateSamplesByUUID sums per-inbound samples into one sample per
+// account. A single xray instance can serve one user through several
+// inbounds (and, in the future, several xray instances can each report the
+// same user), so the exporter emits one Sample per (uuid, inbound_tag) pair.
+// Billing meters and bills per account, not per inbound: processSample keys
+// its checkpoint on (node_id, account_uuid) with no inbound dimension, so
+// feeding it multiple samples for the same account would make them
+// overwrite each other's checkpoint, alternating between a false
+// counter-reset (undercounting) and overcharging on the next cycle. See
+// docs/roadmap/feature-xray-usage-billing-portal-uat/04-minimal-scope.md
+// ("必做 #1") for the incident this fixes.
+//
+// The aggregated sample's InboundTag is intentionally left blank: line-level
+// attribution is out of scope until per-line quotas are introduced, at which
+// point the checkpoint key must gain a line dimension instead of removing
+// this aggregation step.
+func aggregateSamplesByUUID(samples []model.Sample, result *model.JobResult) []model.Sample {
+	aggregated := make(map[string]model.Sample, len(samples))
+	order := make([]string, 0, len(samples))
+	for _, sample := range samples {
+		if err := validateSample(sample); err != nil {
+			result.Status = "partial"
+			result.Error = joinError(result.Error, err.Error())
+			continue
+		}
+		uuid := strings.TrimSpace(sample.UUID)
+		cur, seen := aggregated[uuid]
+		if !seen {
+			cur = model.Sample{UUID: uuid}
+			order = append(order, uuid)
+		}
+		cur.UplinkBytesTotal += sample.UplinkBytesTotal
+		cur.DownlinkBytesTotal += sample.DownlinkBytesTotal
+		if cur.Email == "" {
+			cur.Email = strings.TrimSpace(sample.Email)
+		}
+		aggregated[uuid] = cur
+	}
+
+	out := make([]model.Sample, 0, len(order))
+	for _, uuid := range order {
+		out = append(out, aggregated[uuid])
+	}
+	return out
 }
 
 func (s *Service) processSample(ctx context.Context, snapshot model.Snapshot, sample model.Sample, result *model.JobResult) (bool, error) {

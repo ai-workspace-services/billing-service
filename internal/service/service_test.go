@@ -279,7 +279,7 @@ func TestIncludedQuotaAndMultipliersFromBillingProfile(t *testing.T) {
 		NodeID:      composeStorageNodeID("prod", "jp-node"),
 		AccountUUID: accountUUID,
 		Region:      "",
-		LineCode:    "premium",
+		LineCode:    "",
 	})]
 	if bucket.Multiplier != 2.4 {
 		t.Fatalf("expected multiplier 2.4, got %v", bucket.Multiplier)
@@ -432,7 +432,7 @@ func TestRestartRecoveryFromCheckpoint(t *testing.T) {
 		NodeID:      nodeKey,
 		AccountUUID: accountUUID,
 		Region:      "",
-		LineCode:    "premium",
+		LineCode:    "",
 	})]
 	if bucket.TotalBytes != 70 {
 		t.Fatalf("expected recovered delta 70, got %d", bucket.TotalBytes)
@@ -541,5 +541,252 @@ func TestSourceStatusIncludesSyncState(t *testing.T) {
 	}
 	if result.SourceStatuses[0].LastCompletedUntil == nil {
 		t.Fatalf("expected last completed until in source status")
+	}
+}
+
+// --- Multi-inbound aggregation (see 04-minimal-scope.md "必做 #1") ---
+//
+// A single xray instance can serve one account through several inbounds
+// (e.g. xhttp + tcp), and in the future several xray instances may each
+// report the same account. The exporter emits one Sample per (uuid,
+// inbound_tag) pair, but billing checkpoints on (node_id, account_uuid) with
+// no inbound dimension. Without aggregating by UUID first, samples for the
+// same account would overwrite each other's checkpoint, alternately
+// triggering a false counter-reset and overcharging.
+
+func TestAggregateSamplesByUUIDSumsPerInboundCounters(t *testing.T) {
+	result := &model.JobResult{}
+	samples := []model.Sample{
+		{UUID: "11111111-1111-1111-1111-111111111111", Email: "user@example.com", InboundTag: "xhttp", UplinkBytesTotal: 100, DownlinkBytesTotal: 50},
+		{UUID: "11111111-1111-1111-1111-111111111111", InboundTag: "tcp", UplinkBytesTotal: 30, DownlinkBytesTotal: 20},
+		{UUID: "22222222-2222-2222-2222-222222222222", InboundTag: "xhttp", UplinkBytesTotal: 5, DownlinkBytesTotal: 5},
+	}
+
+	aggregated := aggregateSamplesByUUID(samples, result)
+
+	if len(aggregated) != 2 {
+		t.Fatalf("expected 2 aggregated samples (one per account), got %d: %#v", len(aggregated), aggregated)
+	}
+	first := aggregated[0]
+	if first.UUID != "11111111-1111-1111-1111-111111111111" || first.UplinkBytesTotal != 130 || first.DownlinkBytesTotal != 70 {
+		t.Fatalf("expected first account aggregated up=130 down=70, got %#v", first)
+	}
+	if first.Email != "user@example.com" {
+		t.Fatalf("expected email preserved from first sample, got %q", first.Email)
+	}
+	if first.InboundTag != "" {
+		t.Fatalf("expected aggregated sample to drop the per-inbound tag, got %q", first.InboundTag)
+	}
+	second := aggregated[1]
+	if second.UUID != "22222222-2222-2222-2222-222222222222" || second.UplinkBytesTotal != 5 {
+		t.Fatalf("expected second account unaffected by first account's samples, got %#v", second)
+	}
+}
+
+func TestAggregateSamplesByUUIDSkipsInvalidSamplesButKeepsValidOnes(t *testing.T) {
+	result := &model.JobResult{}
+	samples := []model.Sample{
+		{UUID: "not-a-uuid", InboundTag: "xhttp", UplinkBytesTotal: 100},
+		{UUID: "11111111-1111-1111-1111-111111111111", InboundTag: "tcp", UplinkBytesTotal: 30},
+	}
+
+	aggregated := aggregateSamplesByUUID(samples, result)
+
+	if len(aggregated) != 1 || aggregated[0].UUID != "11111111-1111-1111-1111-111111111111" {
+		t.Fatalf("expected only the valid sample to survive aggregation, got %#v", aggregated)
+	}
+	if result.Status != "partial" {
+		t.Fatalf("expected invalid sample to mark result partial, got %q", result.Status)
+	}
+}
+
+func TestMultiInboundSamplesAggregateIntoSingleAccountBucket(t *testing.T) {
+	repo := newMemoryRepo()
+	accountUUID := "11111111-1111-1111-1111-111111111111"
+	source := &fakeWindowSource{
+		pagesBySource: map[string][]model.SnapshotWindowPage{
+			"default": {singleSnapshotPage(model.Snapshot{
+				CollectedAt: time.Date(2026, 4, 8, 10, 30, 15, 0, time.UTC),
+				NodeID:      "jp-node",
+				Env:         "prod",
+				Samples: []model.Sample{
+					{UUID: accountUUID, Email: "user@example.com", InboundTag: "xhttp", UplinkBytesTotal: 100, DownlinkBytesTotal: 50},
+					{UUID: accountUUID, Email: "user@example.com", InboundTag: "tcp", UplinkBytesTotal: 30, DownlinkBytesTotal: 20},
+				},
+			})},
+		},
+	}
+	svc := New(baseConfig(), source, repo)
+
+	result, err := svc.RunCollectAndRate(context.Background(), "collect-and-rate")
+	if err != nil {
+		t.Fatalf("run job: %v", err)
+	}
+	// Two raw samples for the same account must aggregate into exactly one
+	// processed sample and one bucket, not two.
+	if result.ProcessedSamples != 1 || result.WrittenMinutes != 1 {
+		t.Fatalf("unexpected result %#v", result)
+	}
+	if len(repo.buckets) != 1 {
+		t.Fatalf("expected exactly 1 bucket, got %d", len(repo.buckets))
+	}
+	bucket := repo.buckets[bucketKey(model.MinuteBucket{
+		BucketStart: time.Date(2026, 4, 8, 10, 30, 0, 0, time.UTC),
+		NodeID:      composeStorageNodeID("prod", "jp-node"),
+		AccountUUID: accountUUID,
+		Region:      "",
+		LineCode:    "",
+	})]
+	if bucket.UplinkBytes != 130 || bucket.DownlinkBytes != 70 || bucket.TotalBytes != 200 {
+		t.Fatalf("expected aggregated totals up=130 down=70 total=200, got %#v", bucket)
+	}
+}
+
+func TestMultiInboundCumulativeAcrossRoundsDoesNotFalseReset(t *testing.T) {
+	repo := newMemoryRepo()
+	accountUUID := "11111111-1111-1111-1111-111111111111"
+	nodeKey := composeStorageNodeID("prod", "jp-node")
+	source := &fakeWindowSource{
+		pagesBySource: map[string][]model.SnapshotWindowPage{
+			"default": {
+				singleSnapshotPage(model.Snapshot{
+					CollectedAt: time.Date(2026, 4, 8, 10, 30, 0, 0, time.UTC),
+					NodeID:      "jp-node",
+					Env:         "prod",
+					Samples: []model.Sample{
+						{UUID: accountUUID, InboundTag: "xhttp", UplinkBytesTotal: 100},
+						{UUID: accountUUID, InboundTag: "tcp", UplinkBytesTotal: 50},
+					},
+				}),
+				singleSnapshotPage(model.Snapshot{
+					CollectedAt: time.Date(2026, 4, 8, 10, 31, 0, 0, time.UTC),
+					NodeID:      "jp-node",
+					Env:         "prod",
+					Samples: []model.Sample{
+						{UUID: accountUUID, InboundTag: "xhttp", UplinkBytesTotal: 120},
+						{UUID: accountUUID, InboundTag: "tcp", UplinkBytesTotal: 60},
+					},
+				}),
+			},
+		},
+	}
+	svc := New(baseConfig(), source, repo)
+
+	if _, err := svc.RunCollectAndRate(context.Background(), "collect-and-rate"); err != nil {
+		t.Fatalf("first run: %v", err)
+	}
+	if _, err := svc.RunCollectAndRate(context.Background(), "collect-and-rate"); err != nil {
+		t.Fatalf("second run: %v", err)
+	}
+
+	// Round 1: xhttp(100) + tcp(50) = 150 aggregated uplink.
+	firstBucket := repo.buckets[bucketKey(model.MinuteBucket{
+		BucketStart: time.Date(2026, 4, 8, 10, 30, 0, 0, time.UTC),
+		NodeID:      nodeKey,
+		AccountUUID: accountUUID,
+	})]
+	if firstBucket.UplinkBytes != 150 {
+		t.Fatalf("expected first-round aggregated uplink 150, got %d", firstBucket.UplinkBytes)
+	}
+
+	// Round 2: xhttp(120) + tcp(60) = 180 aggregated; delta over round 1 must
+	// be 180-150=30. Under the pre-fix per-inbound checkpoint keying,
+	// interleaving these two inbounds through the same (node,uuid) checkpoint
+	// would alternately look like a counter reset and drop/overcharge data.
+	secondBucket := repo.buckets[bucketKey(model.MinuteBucket{
+		BucketStart: time.Date(2026, 4, 8, 10, 31, 0, 0, time.UTC),
+		NodeID:      nodeKey,
+		AccountUUID: accountUUID,
+	})]
+	if secondBucket.UplinkBytes != 30 {
+		t.Fatalf("expected second-round delta 30, got %d", secondBucket.UplinkBytes)
+	}
+
+	if got := repo.checkpoints[checkpointKey(nodeKey, accountUUID)].ResetEpoch; got != 0 {
+		t.Fatalf("expected no false reset across rounds, got reset_epoch=%d", got)
+	}
+}
+
+func TestMultiInboundOneInboundStopsReportingIsConservativeReset(t *testing.T) {
+	repo := newMemoryRepo()
+	accountUUID := "11111111-1111-1111-1111-111111111111"
+	nodeKey := composeStorageNodeID("prod", "jp-node")
+	// Seed a checkpoint as if a prior round had aggregated xhttp(100)+tcp(50)=150.
+	repo.checkpoints[checkpointKey(nodeKey, accountUUID)] = model.Checkpoint{
+		NodeID:          nodeKey,
+		AccountUUID:     accountUUID,
+		LastUplinkTotal: 150,
+		LastSeenAt:      time.Now().UTC(),
+	}
+	source := &fakeWindowSource{
+		pagesBySource: map[string][]model.SnapshotWindowPage{
+			"default": {singleSnapshotPage(model.Snapshot{
+				CollectedAt: time.Date(2026, 4, 8, 10, 32, 0, 0, time.UTC),
+				NodeID:      "jp-node",
+				Env:         "prod",
+				// tcp stopped reporting (e.g. xray restarted and dropped the
+				// inbound); only xhttp remains.
+				Samples: []model.Sample{
+					{UUID: accountUUID, InboundTag: "xhttp", UplinkBytesTotal: 120},
+				},
+			})},
+		},
+	}
+	svc := New(baseConfig(), source, repo)
+
+	result, err := svc.RunCollectAndRate(context.Background(), "collect-and-rate")
+	if err != nil {
+		t.Fatalf("run job: %v", err)
+	}
+	// Aggregated total (120) is lower than the checkpoint (150) purely
+	// because tcp stopped reporting. This is conservatively treated as a
+	// possible counter reset rather than a negative charge -- undercounting
+	// is the safe direction, never reverse an existing ledger entry.
+	if result.ProcessedSamples != 0 {
+		t.Fatalf("expected the sample to be treated as a reset, not processed: %#v", result)
+	}
+	if len(repo.buckets) != 0 || len(repo.ledgers) != 0 {
+		t.Fatalf("expected no bucket/ledger writes on apparent reset")
+	}
+	checkpoint := repo.checkpoints[checkpointKey(nodeKey, accountUUID)]
+	if checkpoint.ResetEpoch != 1 {
+		t.Fatalf("expected reset epoch increment, got %d", checkpoint.ResetEpoch)
+	}
+	if checkpoint.LastUplinkTotal != 120 {
+		t.Fatalf("expected checkpoint reset to new total 120, got %d", checkpoint.LastUplinkTotal)
+	}
+}
+
+func TestMultiInboundDuplicateWindowIsReplaySafe(t *testing.T) {
+	repo := newMemoryRepo()
+	accountUUID := "11111111-1111-1111-1111-111111111111"
+	snapshot := model.Snapshot{
+		CollectedAt: time.Date(2026, 4, 8, 10, 30, 30, 0, time.UTC),
+		NodeID:      "jp-node",
+		Env:         "prod",
+		Samples: []model.Sample{
+			{UUID: accountUUID, InboundTag: "xhttp", UplinkBytesTotal: 100, DownlinkBytesTotal: 50},
+			{UUID: accountUUID, InboundTag: "tcp", UplinkBytesTotal: 30, DownlinkBytesTotal: 20},
+		},
+	}
+	source := &fakeWindowSource{
+		pagesBySource: map[string][]model.SnapshotWindowPage{
+			"default": {singleSnapshotPage(snapshot), singleSnapshotPage(snapshot)},
+		},
+	}
+	svc := New(baseConfig(), source, repo)
+
+	if _, err := svc.RunCollectAndRate(context.Background(), "collect-and-rate"); err != nil {
+		t.Fatalf("first run: %v", err)
+	}
+	result, err := svc.RunCollectAndRate(context.Background(), "collect-and-rate")
+	if err != nil {
+		t.Fatalf("second run: %v", err)
+	}
+	if result.ReplayedMinutes == 0 {
+		t.Fatalf("expected replayed minutes on duplicate multi-inbound window, got %#v", result)
+	}
+	if len(repo.ledgers) != 1 {
+		t.Fatalf("expected exactly 1 ledger entry despite replay, got %d", len(repo.ledgers))
 	}
 }
