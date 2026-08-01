@@ -12,6 +12,7 @@
 
 | 日期 | 任务 | 状态 | 关联 |
 |---|---|---|---|
+| 2026-08-01 | [UAT Xray → Exporter → Billing → PostgreSQL → Accounts → Portal 链路审计](2026-08-01-uat-xray-billing-chain-audit.md) | 🟡 Billing/Accounts/Portal 代码缺口已合入；Exporter [#3 OPEN](https://github.com/ai-workspace-xstream/xray-exporter/pull/3)；UAT 网络/source 配置待后续 PR | Billing #24 · Accounts #45/#46 · Portal #130 · GitOps #129/#130 |
 | 2026-07-11 | [**Stripe 订阅/账单/计费打通 —— 项目任务与交接文档**](2026-07-11-stripe-billing-plan.md) | 🟢 P0/P1/P1.5/F0 已上线;P2/P3/F1 未开工(**交接入口,状态以此为准**) | [stripe-billing-integration-plan.md](../stripe-billing-integration-plan.md) · accounts #18-#22 #30 · 本仓 #6 #8 #11 |
 | 2026-07-12 | [Stripe 计费 P1.5(arrears 宽限期 → suspend 状态迁移)](2026-07-12-stripe-billing-p15.md) | ✅ 已合并上线 | 本仓 [#11](https://github.com/ai-workspace-services/billing-service/pull/11) [MERGED];accounts [#30](https://github.com/ai-workspace-services/accounts/pull/30) [MERGED] |
 | 2026-07-12 | [PR-8 多云 FinOps SDK 集成](PR-8-finops-sdk-integration.md) | ✅ 代码已合并;凭据接线待核实 | 本仓 [#8](https://github.com/ai-workspace-services/billing-service/pull/8) [MERGED] |
