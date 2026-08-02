@@ -31,6 +31,26 @@ func TestLoadExporterSourcesFallsBackToLegacyBaseURL(t *testing.T) {
 	}
 }
 
+func TestPushModeDoesNotRequireExporterSource(t *testing.T) {
+	t.Setenv("APP_ENV", "test")
+	t.Setenv("DATABASE_URL", "postgres://example")
+	t.Setenv("INTERNAL_SERVICE_TOKEN", "token")
+	t.Setenv("BILLING_INGEST_MODE", "push")
+	t.Setenv("EXPORTER_BASE_URL", "")
+	t.Setenv("EXPORTER_SOURCES_JSON", "")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("load push config: %v", err)
+	}
+	if cfg.IngestMode != "push" || cfg.PullEnabled {
+		t.Fatalf("unexpected push config: %#v", cfg)
+	}
+	if len(cfg.ExporterSources) != 0 {
+		t.Fatalf("push mode must not configure exporter pull sources: %#v", cfg.ExporterSources)
+	}
+}
+
 func TestParseImageRefWithFullShaTag(t *testing.T) {
 	tag, commit, version := parseImageRef("registry.example.com/billing-service:sha-0123456789abcdef0123456789abcdef01234567")
 	if tag != "sha-0123456789abcdef0123456789abcdef01234567" {

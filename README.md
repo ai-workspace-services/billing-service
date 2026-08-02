@@ -3,9 +3,10 @@
 `billing-service` is the v1 minute-delta and replay-safe writer for the Cloud
 Network Billing & Control Plane.
 
-It pulls windowed normalized snapshots from one or more `xray-exporter`
-sources, computes deltas from cumulative counters, and writes idempotent usage
-and billing facts into the existing `accounts.svc.plus` PostgreSQL schema.
+It accepts normalized snapshots from Vector, computes deltas from cumulative
+counters, and writes idempotent usage and billing facts into the existing
+`accounts.svc.plus` PostgreSQL schema. Direct pulls from `xray-exporter` remain
+available only as an explicit compatibility mode.
 
 Deployment note:
 
@@ -20,6 +21,7 @@ Deployment note:
 - `GET /api/ping`
 - `POST /v1/jobs/collect-and-rate`
 - `POST /v1/jobs/reconcile`
+- `POST /v1/ingest/snapshots` (Bearer `INTERNAL_SERVICE_TOKEN`)
 - `GET /healthz`
 - `GET /v1/status`
 
@@ -34,6 +36,7 @@ Deployment note:
 - `docs/api.md` - task API surface and upstream/downstream boundaries
 - `sql/billing-service-schema.sql` - bootstrap/reference DDL aligned with the
   current `accounts.svc.plus` accounting schema
+- `docs/tasks/2026-08-02-vector-billing-ingest.md` - Vector fan-out contract
 
 ## CI/CD 与 Vault 鉴权 (Vault OIDC Role)
 
