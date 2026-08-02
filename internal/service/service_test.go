@@ -642,6 +642,36 @@ func TestMultiInboundSamplesAggregateIntoSingleAccountBucket(t *testing.T) {
 	}
 }
 
+func TestIngestSnapshotUsesPushPathWithoutExporterSource(t *testing.T) {
+	repo := newMemoryRepo()
+	cfg := baseConfig()
+	cfg.ExporterSources = nil
+	cfg.PullEnabled = false
+	svc := New(cfg, &fakeWindowSource{}, repo)
+
+	accountUUID := "11111111-1111-1111-1111-111111111111"
+	result, err := svc.IngestSnapshot(context.Background(), model.Snapshot{
+		CollectedAt: time.Date(2026, 4, 8, 10, 30, 15, 0, time.UTC),
+		NodeID:      "uat-node",
+		Env:         "uat",
+		Samples: []model.Sample{{
+			UUID:               accountUUID,
+			Email:              "user@example.com",
+			UplinkBytesTotal:   130,
+			DownlinkBytesTotal: 70,
+		}},
+	})
+	if err != nil {
+		t.Fatalf("ingest snapshot: %v", err)
+	}
+	if result.ProcessedSamples != 1 || result.WrittenMinutes != 1 {
+		t.Fatalf("unexpected ingest result %#v", result)
+	}
+	if len(repo.buckets) != 1 || len(repo.ledgers) != 1 {
+		t.Fatalf("expected one bucket and ledger, buckets=%d ledgers=%d", len(repo.buckets), len(repo.ledgers))
+	}
+}
+
 func TestMultiInboundCumulativeAcrossRoundsDoesNotFalseReset(t *testing.T) {
 	repo := newMemoryRepo()
 	accountUUID := "11111111-1111-1111-1111-111111111111"

@@ -3,6 +3,7 @@ package httpapi
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 
 	"billing-service/internal/model"
 	"billing-service/internal/service"
@@ -10,10 +11,11 @@ import (
 
 type Handler struct {
 	service *service.Service
+	token   string
 }
 
-func New(svc *service.Service) *Handler {
-	return &Handler{service: svc}
+func New(svc *service.Service, token string) *Handler {
+	return &Handler{service: svc, token: strings.TrimSpace(token)}
 }
 
 func (h *Handler) Routes() http.Handler {
@@ -23,7 +25,30 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("/v1/status", h.status)
 	mux.HandleFunc("/v1/jobs/collect-and-rate", h.collectAndRate)
 	mux.HandleFunc("/v1/jobs/reconcile", h.reconcile)
+	mux.HandleFunc("/v1/ingest/snapshots", h.ingestSnapshot)
 	return mux
+}
+
+func (h *Handler) ingestSnapshot(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if h.token == "" || strings.TrimSpace(r.Header.Get("Authorization")) != "Bearer "+h.token {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	var snapshot model.Snapshot
+	if err := json.NewDecoder(r.Body).Decode(&snapshot); err != nil {
+		http.Error(w, "invalid snapshot: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	result, err := h.service.IngestSnapshot(r.Context(), snapshot)
+	if err != nil {
+		writeJSON(w, http.StatusUnprocessableEntity, result)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
 }
 
 func (h *Handler) ping(w http.ResponseWriter, r *http.Request) {

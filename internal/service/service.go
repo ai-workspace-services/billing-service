@@ -44,6 +44,9 @@ func New(cfg config.Config, source windowSource, repo repository.Repository) *Se
 }
 
 func (s *Service) Start(ctx context.Context) {
+	if !s.pullEnabled() {
+		return
+	}
 	go func() {
 		_, _ = s.RunCollectAndRate(ctx, "collect-and-rate")
 		ticker := time.NewTicker(s.cfg.CollectInterval)
@@ -68,6 +71,13 @@ func (s *Service) RunCollectAndRate(ctx context.Context, job string) (model.JobR
 		Job:       job,
 		StartedAt: startedAt,
 		Status:    "ok",
+	}
+	if !s.pullEnabled() {
+		result.Status = "disabled"
+		result.Error = "direct exporter pull is disabled; ingest snapshots through Vector"
+		result.FinishedAt = time.Now().UTC()
+		s.record(result)
+		return result, errors.New(result.Error)
 	}
 
 	enabledSources := 0
@@ -98,6 +108,46 @@ func (s *Service) RunCollectAndRate(ctx context.Context, job string) (model.JobR
 		}
 	}
 
+	result.FinishedAt = time.Now().UTC()
+	s.record(result)
+	if result.Status == "error" {
+		return result, errors.New(result.Error)
+	}
+	return result, nil
+}
+
+// pullEnabled keeps programmatic callers that construct Config directly
+// compatible with the pre-ingest tests and integrations. Loaded production
+// config uses BILLING_INGEST_MODE explicitly; push mode has no sources.
+func (s *Service) pullEnabled() bool {
+	return s.cfg.PullEnabled || len(s.cfg.ExporterSources) > 0
+}
+
+// IngestSnapshot rates one exporter snapshot delivered by Vector. The
+// existing checkpoint and deterministic ledger keys make retries idempotent,
+// so Vector can safely retry transient HTTP failures without double charging.
+func (s *Service) IngestSnapshot(ctx context.Context, snapshot model.Snapshot) (model.JobResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	startedAt := time.Now().UTC()
+	result := model.JobResult{Job: "ingest-snapshot", StartedAt: startedAt, Status: "ok"}
+	switch {
+	case snapshot.CollectedAt.IsZero():
+		result.Status = "error"
+		result.Error = "snapshot collected_at is required"
+	case strings.TrimSpace(snapshot.NodeID) == "":
+		result.Status = "error"
+		result.Error = "snapshot node_id is required"
+	case strings.TrimSpace(snapshot.Env) == "":
+		result.Status = "error"
+		result.Error = "snapshot env is required"
+	default:
+		if _, err := s.processSnapshot(ctx, snapshot, &result); err != nil {
+			result.Status = "error"
+			result.Error = err.Error()
+		}
+	}
 	result.FinishedAt = time.Now().UTC()
 	s.record(result)
 	if result.Status == "error" {
