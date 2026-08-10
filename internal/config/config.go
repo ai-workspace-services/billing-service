@@ -22,12 +22,17 @@ type ExporterSource struct {
 }
 
 type Config struct {
-	ImageRef                  string
-	ImageTag                  string
-	ImageCommit               string
-	ImageVersion              string
-	ExporterBaseURL           string
-	ExporterSources           []ExporterSource
+	ImageRef        string
+	ImageTag        string
+	ImageCommit     string
+	ImageVersion    string
+	ExporterBaseURL string
+	ExporterSources []ExporterSource
+	// IngestMode is the authoritative usage ingestion path. The default is
+	// push: Vector delivers exporter snapshots to Billing. Direct exporter
+	// pulling is retained only as an explicit compatibility mode.
+	IngestMode                string
+	PullEnabled               bool
 	InternalServiceToken      string
 	DatabaseURL               string
 	ListenAddr                string
@@ -90,6 +95,7 @@ func Load() (Config, error) {
 		ImageCommit:          imageCommit,
 		ImageVersion:         imageVersion,
 		ExporterBaseURL:      strings.TrimRight(strings.TrimSpace(os.Getenv("EXPORTER_BASE_URL")), "/"),
+		IngestMode:           strings.ToLower(strings.TrimSpace(os.Getenv("BILLING_INGEST_MODE"))),
 		InternalServiceToken: strings.TrimSpace(os.Getenv("INTERNAL_SERVICE_TOKEN")),
 		DatabaseURL:          strings.TrimSpace(os.Getenv("DATABASE_URL")),
 		ListenAddr:           strings.TrimSpace(os.Getenv("LISTEN_ADDR")),
@@ -121,6 +127,17 @@ func Load() (Config, error) {
 	if cfg.SourceRevision == "" {
 		cfg.SourceRevision = "billing-service-v1"
 	}
+	if cfg.IngestMode == "" {
+		cfg.IngestMode = "push"
+	}
+	switch cfg.IngestMode {
+	case "push":
+		cfg.PullEnabled = false
+	case "pull":
+		cfg.PullEnabled = true
+	default:
+		return Config{}, fmt.Errorf("BILLING_INGEST_MODE must be push or pull, got %q", cfg.IngestMode)
+	}
 
 	if cfg.DatabaseURL == "" {
 		return Config{}, fmt.Errorf("DATABASE_URL is required")
@@ -129,11 +146,13 @@ func Load() (Config, error) {
 		return Config{}, fmt.Errorf("INTERNAL_SERVICE_TOKEN is required")
 	}
 
-	sources, err := loadExporterSources(cfg.ExporterBaseURL, strings.TrimSpace(os.Getenv("EXPORTER_SOURCES_JSON")))
-	if err != nil {
-		return Config{}, err
+	if cfg.PullEnabled {
+		sources, err := loadExporterSources(cfg.ExporterBaseURL, strings.TrimSpace(os.Getenv("EXPORTER_SOURCES_JSON")))
+		if err != nil {
+			return Config{}, err
+		}
+		cfg.ExporterSources = sources
 	}
-	cfg.ExporterSources = sources
 
 	interval := strings.TrimSpace(os.Getenv("COLLECT_INTERVAL"))
 	if interval == "" {

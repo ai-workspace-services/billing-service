@@ -44,6 +44,9 @@ func New(cfg config.Config, source windowSource, repo repository.Repository) *Se
 }
 
 func (s *Service) Start(ctx context.Context) {
+	if !s.pullEnabled() {
+		return
+	}
 	go func() {
 		_, _ = s.RunCollectAndRate(ctx, "collect-and-rate")
 		ticker := time.NewTicker(s.cfg.CollectInterval)
@@ -68,6 +71,13 @@ func (s *Service) RunCollectAndRate(ctx context.Context, job string) (model.JobR
 		Job:       job,
 		StartedAt: startedAt,
 		Status:    "ok",
+	}
+	if !s.pullEnabled() {
+		result.Status = "disabled"
+		result.Error = "direct exporter pull is disabled; ingest snapshots through Vector"
+		result.FinishedAt = time.Now().UTC()
+		s.record(result)
+		return result, errors.New(result.Error)
 	}
 
 	enabledSources := 0
@@ -98,6 +108,46 @@ func (s *Service) RunCollectAndRate(ctx context.Context, job string) (model.JobR
 		}
 	}
 
+	result.FinishedAt = time.Now().UTC()
+	s.record(result)
+	if result.Status == "error" {
+		return result, errors.New(result.Error)
+	}
+	return result, nil
+}
+
+// pullEnabled keeps programmatic callers that construct Config directly
+// compatible with the pre-ingest tests and integrations. Loaded production
+// config uses BILLING_INGEST_MODE explicitly; push mode has no sources.
+func (s *Service) pullEnabled() bool {
+	return s.cfg.PullEnabled || len(s.cfg.ExporterSources) > 0
+}
+
+// IngestSnapshot rates one exporter snapshot delivered by Vector. The
+// existing checkpoint and deterministic ledger keys make retries idempotent,
+// so Vector can safely retry transient HTTP failures without double charging.
+func (s *Service) IngestSnapshot(ctx context.Context, snapshot model.Snapshot) (model.JobResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	startedAt := time.Now().UTC()
+	result := model.JobResult{Job: "ingest-snapshot", StartedAt: startedAt, Status: "ok"}
+	switch {
+	case snapshot.CollectedAt.IsZero():
+		result.Status = "error"
+		result.Error = "snapshot collected_at is required"
+	case strings.TrimSpace(snapshot.NodeID) == "":
+		result.Status = "error"
+		result.Error = "snapshot node_id is required"
+	case strings.TrimSpace(snapshot.Env) == "":
+		result.Status = "error"
+		result.Error = "snapshot env is required"
+	default:
+		if _, err := s.processSnapshot(ctx, snapshot, &result); err != nil {
+			result.Status = "error"
+			result.Error = err.Error()
+		}
+	}
 	result.FinishedAt = time.Now().UTC()
 	s.record(result)
 	if result.Status == "error" {
@@ -212,13 +262,7 @@ func (s *Service) collectSource(ctx context.Context, source config.ExporterSourc
 
 func (s *Service) processSnapshot(ctx context.Context, snapshot model.Snapshot, result *model.JobResult) (bool, error) {
 	processedAny := false
-	for _, sample := range snapshot.Samples {
-		if err := validateSample(sample); err != nil {
-			result.Status = "partial"
-			result.Error = joinError(result.Error, err.Error())
-			continue
-		}
-
+	for _, sample := range aggregateSamplesByUUID(snapshot.Samples, result) {
 		processed, err := s.processSample(ctx, snapshot, sample, result)
 		if err != nil {
 			return processedAny, fmt.Errorf("process snapshot %s for %s: %w", snapshot.CollectedAt.UTC().Format(time.RFC3339), sample.UUID, err)
@@ -229,6 +273,52 @@ func (s *Service) processSnapshot(ctx context.Context, snapshot model.Snapshot, 
 		}
 	}
 	return processedAny, nil
+}
+
+// aggregateSamplesByUUID sums per-inbound samples into one sample per
+// account. A single xray instance can serve one user through several
+// inbounds (and, in the future, several xray instances can each report the
+// same user), so the exporter emits one Sample per (uuid, inbound_tag) pair.
+// Billing meters and bills per account, not per inbound: processSample keys
+// its checkpoint on (node_id, account_uuid) with no inbound dimension, so
+// feeding it multiple samples for the same account would make them
+// overwrite each other's checkpoint, alternating between a false
+// counter-reset (undercounting) and overcharging on the next cycle. See
+// docs/roadmap/feature-xray-usage-billing-portal-uat/04-minimal-scope.md
+// ("必做 #1") for the incident this fixes.
+//
+// The aggregated sample's InboundTag is intentionally left blank: line-level
+// attribution is out of scope until per-line quotas are introduced, at which
+// point the checkpoint key must gain a line dimension instead of removing
+// this aggregation step.
+func aggregateSamplesByUUID(samples []model.Sample, result *model.JobResult) []model.Sample {
+	aggregated := make(map[string]model.Sample, len(samples))
+	order := make([]string, 0, len(samples))
+	for _, sample := range samples {
+		if err := validateSample(sample); err != nil {
+			result.Status = "partial"
+			result.Error = joinError(result.Error, err.Error())
+			continue
+		}
+		uuid := strings.TrimSpace(sample.UUID)
+		cur, seen := aggregated[uuid]
+		if !seen {
+			cur = model.Sample{UUID: uuid}
+			order = append(order, uuid)
+		}
+		cur.UplinkBytesTotal += sample.UplinkBytesTotal
+		cur.DownlinkBytesTotal += sample.DownlinkBytesTotal
+		if cur.Email == "" {
+			cur.Email = strings.TrimSpace(sample.Email)
+		}
+		aggregated[uuid] = cur
+	}
+
+	out := make([]model.Sample, 0, len(order))
+	for _, uuid := range order {
+		out = append(out, aggregated[uuid])
+	}
+	return out
 }
 
 func (s *Service) processSample(ctx context.Context, snapshot model.Snapshot, sample model.Sample, result *model.JobResult) (bool, error) {

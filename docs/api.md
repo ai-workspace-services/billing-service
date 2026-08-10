@@ -81,6 +81,21 @@ Behavior:
 Triggers the same execution path as collect-and-rate, but records the job name
 as `reconcile` for operational visibility.
 
+### `POST /v1/ingest/snapshots`
+
+Accepts one normalized exporter snapshot delivered by Vector. The request must
+include `Authorization: Bearer <INTERNAL_SERVICE_TOKEN>` and a JSON body with
+`collected_at`, `node_id`, `env`, and `samples`.
+
+Billing validates the snapshot identity, computes cumulative-counter deltas,
+and writes the existing minute bucket, ledger, quota, and checkpoint records.
+The checkpoint and deterministic ledger keys make retries safe. In the default
+`BILLING_INGEST_MODE=push`, this is the authoritative ingestion endpoint.
+
+When `BILLING_INGEST_MODE=pull` is explicitly selected, the legacy job endpoints
+may pull `/v1/snapshots/window` from configured exporter sources. Push mode does
+not require `EXPORTER_BASE_URL` or `EXPORTER_SOURCES_JSON`.
+
 ## Upstream dependency
 
 ### `xray-exporter`

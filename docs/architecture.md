@@ -32,8 +32,9 @@ flowchart TB
     Console["console.svc.plus"]
   end
 
-  Agent --> Billing
   Agent -. coordination .-> Exporter
+  Exporter --> Vector
+  Vector --> Billing
   Billing --> StunnelClient
   StunnelClient --> StunnelServer
   StunnelServer --> PostgreSQL
@@ -54,8 +55,8 @@ flowchart LR
   Agent["agent-svc-plus<br/>control plane"]
 
   Xray -->|"raw per-UUID totals"| Exporter
-  Exporter -->|"GET /v1/snapshots/window"| Billing
-  Agent -->|"schedule collect / reconcile"| Billing
+  Exporter -->|"POST snapshot JSON"| Vector
+  Vector -->|"POST /v1/ingest/snapshots"| Billing
   Billing -->|"idempotent writes"| PostgreSQL
   PostgreSQL -->|"usage + ledger + quota facts"| Accounts
   Accounts -->|"account usage / billing summary APIs"| Console
@@ -92,23 +93,20 @@ schema.
 
 ### Current implementation
 
-- `billing-service` loads one or more sources from `EXPORTER_SOURCES_JSON`
-- if `EXPORTER_SOURCES_JSON` is absent, it still accepts a single
-  `EXPORTER_BASE_URL` as a compatibility path
-- the upstream snapshot source is `GET /v1/snapshots/window`
-- the service is a task-oriented writer with health, status, and job endpoints
+- `billing-service` defaults to `BILLING_INGEST_MODE=push`
+- Vector receives exporter snapshots locally and forwards them to the
+  authenticated `/v1/ingest/snapshots` endpoint
+- the legacy `GET /v1/snapshots/window` pull path is explicit compatibility mode
+- Prometheus metrics continue to flow independently to Observability/Grafana
 - persisted facts land in the existing `accounts.svc.plus` accounting schema
 
 ### Target architecture
 
-- `billing-service` remains the write model, but evolves into a multi-node
-  aggregation point
-- the write path handles multiple exporter feeds or equivalent multi-node sample
-  sets without losing `node_id`, `env`, or `inbound_tag`
-- remote exporter ingestion must work over HTTPS because exporters are not
-  guaranteed to live on the same private network
-- the target pull contract must keep source checkpoints and replay-safe
-  catch-up explicit and observable across nodes
+- `billing-service` remains the single write model for the shared database
+- the write path handles multiple nodes and inbounds after exporter-side UUID
+  aggregation, preserving `node_id` and `env`
+- Vector owns remote HTTPS delivery, buffering, retry, and fan-out
+- Grafana availability is independent of Billing availability
 - `accounts.svc.plus` stays the read model and never delegates user-facing
   usage/billing reads back to `billing-service`
 

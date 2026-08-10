@@ -52,7 +52,7 @@ func main() {
 
 	server := &http.Server{
 		Addr:    cfg.ListenAddr,
-		Handler: httpapi.New(svc).Routes(),
+		Handler: httpapi.New(svc, cfg.InternalServiceToken).Routes(),
 	}
 
 	go func() {

@@ -76,7 +76,9 @@ flowchart LR
 
 ## 3. 一次 collect-and-rate 的主流程
 
-HTTP `POST /v1/jobs/collect-and-rate` 和后台 ticker 都会进入 `service.Service.RunCollectAndRate`。当前主路径如下：
+默认的 HTTP `POST /v1/ingest/snapshots` 进入 `service.Service.IngestSnapshot`；
+只有显式 `BILLING_INGEST_MODE=pull` 时，旧的 job/ticker 才进入
+`RunCollectAndRate`。
 
 ```mermaid
 sequenceDiagram
@@ -188,14 +190,15 @@ sequenceDiagram
 配置由 `internal/config.Load()` 从环境变量读取。关键项：
 
 - 必填：`DATABASE_URL`、`INTERNAL_SERVICE_TOKEN`
-- 来源配置主路径：`EXPORTER_SOURCES_JSON`
-- 当前兼容路径：`EXPORTER_BASE_URL`
+- 默认入口：`BILLING_INGEST_MODE=push`
+- 显式兼容入口：`BILLING_INGEST_MODE=pull` + `EXPORTER_SOURCES_JSON`
+- 旧单来源兼容：`EXPORTER_BASE_URL`
 - 监听与计费默认值：`LISTEN_ADDR`、`COLLECT_INTERVAL`、`SOURCE_REVISION`、`PRICE_PER_BYTE`、`INITIAL_INCLUDED_QUOTA_BYTES`、`INITIAL_BALANCE`
 
 当前建议：
 
-- 使用 `EXPORTER_SOURCES_JSON` 明确声明一个或多个来源
-- 仅把 `EXPORTER_BASE_URL` 视为当前仍保留的兼容入口，不作为主设计
+- 使用 Vector 的 `/v1/ingest/snapshots` sink 作为默认计费输入
+- 仅在回滚或迁移期间显式启用 pull，不把 Billing 直接 pull Exporter 作为主设计
 
 详细字段见 [reference/config.md](reference/config.md)。
 
