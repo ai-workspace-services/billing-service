@@ -82,6 +82,11 @@ jobs:
       - name: Compute Service Image Tags
         id: meta
         uses: docker/metadata-action@v5
+        env:
+          # Node 24 does not automatically use the runner's system CA store.
+          # metadata-action performs HTTPS metadata lookups and must trust the
+          # runner-installed CA used by the GitHub Actions network path.
+          NODE_OPTIONS: --use-system-ca
         with:
           images: ghcr.io/${{ github.repository }}
           tags: |
