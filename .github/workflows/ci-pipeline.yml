@@ -98,7 +98,9 @@ jobs:
           context: .
           push: ${{ needs.prep.outputs.push_image == 'true' }}
           tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          labels: |
+            ${{ steps.meta.outputs.labels }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
 
   release:
     name: Publish release manifest and assets
