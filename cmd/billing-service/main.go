@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"database/sql"
 	"log"
 	"log/slog"
 	"net/http"
@@ -12,10 +11,13 @@ import (
 	"billing-service/internal/config"
 	"billing-service/internal/exporter"
 	"billing-service/internal/httpapi"
+	"billing-service/internal/observability"
 	"billing-service/internal/repository"
 	"billing-service/internal/service"
 
+	"github.com/XSAM/otelsql"
 	_ "github.com/jackc/pgx/v5/stdlib"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
 
 func main() {
@@ -24,14 +26,24 @@ func main() {
 		log.Fatal(err)
 	}
 
-	db, err := sql.Open("pgx", cfg.DatabaseURL)
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	shutdownTracing, err := observability.Configure(ctx, "web-saas-billing")
+	if err != nil {
+		log.Printf("OTLP tracing disabled: %v", err)
+	} else {
+		defer func() {
+			if err := shutdownTracing(context.Background()); err != nil {
+				log.Printf("flush OTLP traces: %v", err)
+			}
+		}()
+	}
+
+	db, err := otelsql.Open("pgx", cfg.DatabaseURL)
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer db.Close()
-
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
 
 	repo := repository.NewPostgres(db)
 	svc := service.New(
@@ -52,7 +64,7 @@ func main() {
 
 	server := &http.Server{
 		Addr:    cfg.ListenAddr,
-		Handler: httpapi.New(svc, cfg.InternalServiceToken).Routes(),
+		Handler: otelhttp.NewHandler(httpapi.New(svc, cfg.InternalServiceToken).Routes(), "billing.request"),
 	}
 
 	go func() {
