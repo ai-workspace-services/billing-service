@@ -5,6 +5,7 @@ import (
 	"log"
 	"log/slog"
 	"net/http"
+	"os"
 	"os/signal"
 	"syscall"
 
@@ -53,7 +54,10 @@ func main() {
 	)
 	svc.Start(ctx)
 
-	logger := slog.Default()
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{})).With(
+		observability.RuntimeLogAttrs("web-saas-billing")...,
+	)
+	slog.SetDefault(logger)
 
 	// Initialize and start FinOps Syncer (Cloud Billing)
 	finopsSyncer := service.NewFinOpsSyncer(repo, logger, cfg)
@@ -63,8 +67,11 @@ func main() {
 	go suspendSyncer.Start(ctx)
 
 	server := &http.Server{
-		Addr:    cfg.ListenAddr,
-		Handler: otelhttp.NewHandler(httpapi.New(svc, cfg.InternalServiceToken).Routes(), "billing.request"),
+		Addr: cfg.ListenAddr,
+		Handler: otelhttp.NewHandler(
+			observability.RequestLogger(logger, httpapi.New(svc, cfg.InternalServiceToken).Routes()),
+			"billing.request",
+		),
 	}
 
 	go func() {
