@@ -51,6 +51,44 @@ func TestPushModeDoesNotRequireExporterSource(t *testing.T) {
 	}
 }
 
+func TestSupabaseConnectURIOverridesDatabaseURL(t *testing.T) {
+	t.Setenv("APP_ENV", "test")
+	t.Setenv("DATABASE_URL", "postgres://vps.example/billing")
+	t.Setenv("SUPABASE_CONNECT_URI", "postgres://supabase.example/billing")
+	t.Setenv("SUPABASE_CONNECT_URL", "postgres://legacy-alias.example/billing")
+	t.Setenv("INTERNAL_SERVICE_TOKEN", "token")
+	t.Setenv("BILLING_INGEST_MODE", "push")
+	t.Setenv("EXPORTER_BASE_URL", "")
+	t.Setenv("EXPORTER_SOURCES_JSON", "")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if got, want := cfg.DatabaseURL, "postgres://supabase.example/billing"; got != want {
+		t.Fatalf("DatabaseURL = %q, want %q", got, want)
+	}
+}
+
+func TestSupabaseConnectURLIsTransitionAlias(t *testing.T) {
+	t.Setenv("APP_ENV", "test")
+	t.Setenv("DATABASE_URL", "postgres://vps.example/billing")
+	t.Setenv("SUPABASE_CONNECT_URI", "")
+	t.Setenv("SUPABASE_CONNECT_URL", "postgres://supabase-alias.example/billing")
+	t.Setenv("INTERNAL_SERVICE_TOKEN", "token")
+	t.Setenv("BILLING_INGEST_MODE", "push")
+	t.Setenv("EXPORTER_BASE_URL", "")
+	t.Setenv("EXPORTER_SOURCES_JSON", "")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if got, want := cfg.DatabaseURL, "postgres://supabase-alias.example/billing"; got != want {
+		t.Fatalf("DatabaseURL = %q, want %q", got, want)
+	}
+}
+
 func TestParseImageRefWithFullShaTag(t *testing.T) {
 	tag, commit, version := parseImageRef("registry.example.com/billing-service:sha-0123456789abcdef0123456789abcdef01234567")
 	if tag != "sha-0123456789abcdef0123456789abcdef01234567" {

@@ -89,6 +89,17 @@ func Load() (Config, error) {
 
 	imageRef := strings.TrimSpace(os.Getenv("IMAGE"))
 	imageTag, imageCommit, imageVersion := parseImageRef(imageRef)
+	databaseURL := strings.TrimSpace(os.Getenv("DATABASE_URL"))
+	// SUPABASE_CONNECT_URI is the canonical PostgreSQL connection URI for
+	// Supabase runtime use. SUPABASE_CONNECT_URL is accepted as a transition
+	// alias, while DATABASE_URL remains the VPS/self-hosted fallback.
+	supabaseConnectURI := strings.TrimSpace(os.Getenv("SUPABASE_CONNECT_URI"))
+	if supabaseConnectURI == "" {
+		supabaseConnectURI = strings.TrimSpace(os.Getenv("SUPABASE_CONNECT_URL"))
+	}
+	if supabaseConnectURI != "" {
+		databaseURL = supabaseConnectURI
+	}
 	cfg := Config{
 		ImageRef:             imageRef,
 		ImageTag:             imageTag,
@@ -97,7 +108,7 @@ func Load() (Config, error) {
 		ExporterBaseURL:      strings.TrimRight(strings.TrimSpace(os.Getenv("EXPORTER_BASE_URL")), "/"),
 		IngestMode:           strings.ToLower(strings.TrimSpace(os.Getenv("BILLING_INGEST_MODE"))),
 		InternalServiceToken: strings.TrimSpace(os.Getenv("INTERNAL_SERVICE_TOKEN")),
-		DatabaseURL:          strings.TrimSpace(os.Getenv("DATABASE_URL")),
+		DatabaseURL:          databaseURL,
 		ListenAddr:           strings.TrimSpace(os.Getenv("LISTEN_ADDR")),
 		DefaultRegion:        strings.TrimSpace(os.Getenv("DEFAULT_REGION")),
 		SourceRevision:       strings.TrimSpace(os.Getenv("SOURCE_REVISION")),

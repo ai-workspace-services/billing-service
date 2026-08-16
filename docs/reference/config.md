@@ -39,7 +39,7 @@
 | `ExporterBaseURL` | `string` | 旧单来源兼容入口，对应 `EXPORTER_BASE_URL` |
 | `ExporterSources` | `[]ExporterSource` | 当前实际启用的来源清单，推荐由 `EXPORTER_SOURCES_JSON` 生成 |
 | `InternalServiceToken` | `string` | 调用 exporter 的 Bearer token |
-| `DatabaseURL` | `string` | PostgreSQL DSN |
+| `DatabaseURL` | `string` | Resolved PostgreSQL DSN; `SUPABASE_CONNECT_URI`, then `SUPABASE_CONNECT_URL`, then `DATABASE_URL` |
 | `ListenAddr` | `string` | HTTP 监听地址，默认 `:8081` |
 | `CollectInterval` | `time.Duration` | 后台定时采集间隔，默认 1 分钟 |
 | `DefaultRegion` | `string` | 写入分钟桶时的默认地域 |
@@ -71,7 +71,9 @@
 | `EXPORTER_SOURCES_JSON` | 条件必填 | 无 | 推荐的多来源配置入口 |
 | `EXPORTER_BASE_URL` | 条件必填 | 无 | 当前兼容路径，仅在未提供 `EXPORTER_SOURCES_JSON` 时使用 |
 | `INTERNAL_SERVICE_TOKEN` | 是 | 无 | exporter Bearer token |
-| `DATABASE_URL` | 是 | 无 | PostgreSQL 连接串 |
+| `SUPABASE_CONNECT_URI` | 否 | 空字符串 | Supabase PostgreSQL 连接 URI；设置后优先于其他数据库连接变量 |
+| `SUPABASE_CONNECT_URL` | 否 | 空字符串 | `SUPABASE_CONNECT_URI` 的兼容别名 |
+| `DATABASE_URL` | 条件必填 | 无 | VPS/self-hosted PostgreSQL 连接串；仅在两个 Supabase 变量均为空时使用 |
 | `LISTEN_ADDR` | 否 | `:8081` | HTTP 监听地址 |
 | `COLLECT_INTERVAL` | 否 | `1m` | 后台定时采集间隔 |
 | `DEFAULT_REGION` | 否 | 空字符串 | 分钟桶地域字段 |
@@ -99,7 +101,7 @@
 - 主要副作用：
   - 读取进程环境变量
 - 错误/边界条件：
-  - `DATABASE_URL` 为空时报错
+  - `SUPABASE_CONNECT_URI`、`SUPABASE_CONNECT_URL`、`DATABASE_URL` 全部为空时报错
   - `INTERNAL_SERVICE_TOKEN` 为空时报错
   - `COLLECT_INTERVAL` 无法解析时报错
   - `EXPORTER_SOURCES_JSON` 非法或为空列表时报错

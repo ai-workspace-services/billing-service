@@ -54,13 +54,16 @@ Local or operator dry-run validation:
 ```bash
 cd /Users/shenlan/workspaces/cloud-neutral-toolkit/playbooks
 export DATABASE_URL=postgres://...
+# Supabase Cloud runtime (takes precedence over DATABASE_URL):
+# export SUPABASE_CONNECT_URI=postgres://...pooler.supabase.com:5432/postgres
 ANSIBLE_CONFIG=./ansible.cfg \
 ansible-playbook -i ./inventory.ini -D -C ./deploy_billing_service.yml -l jp_xhttp_contabo_host
 ```
 
 Notes:
 
-- `DATABASE_URL` must be exported before running `deploy_billing_service.yml`
+- `SUPABASE_CONNECT_URI` or the VPS fallback `DATABASE_URL` must be exported
+  before running `deploy_billing_service.yml`
 - on `jp-xhttp-contabo.svc.plus`, `DATABASE_URL` should reference the same
   `account` database used by `accounts.svc.plus`
 - `BILLING_DB_USER` and `BILLING_DB_PASSWORD` are the preferred deployment
