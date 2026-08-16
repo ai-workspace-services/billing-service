@@ -143,7 +143,12 @@ func Load() (Config, error) {
 		OpenCostAuthToken: strings.TrimSpace(os.Getenv("OPENCOST_AUTH_TOKEN")),
 	}
 	if cfg.ListenAddr == "" {
-		cfg.ListenAddr = ":8081"
+		port := strings.TrimSpace(os.Getenv("PORT"))
+		if port == "" {
+			cfg.ListenAddr = ":8081"
+		} else {
+			cfg.ListenAddr = ":" + port
+		}
 	}
 	if cfg.SourceRevision == "" {
 		cfg.SourceRevision = "billing-service-v1"

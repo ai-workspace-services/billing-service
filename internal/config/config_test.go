@@ -51,6 +51,44 @@ func TestPushModeDoesNotRequireExporterSource(t *testing.T) {
 	}
 }
 
+func TestPortOverridesVPSDefaultListenAddress(t *testing.T) {
+	t.Setenv("APP_ENV", "test")
+	t.Setenv("DATABASE_URL", "postgres://example")
+	t.Setenv("INTERNAL_SERVICE_TOKEN", "token")
+	t.Setenv("BILLING_INGEST_MODE", "push")
+	t.Setenv("LISTEN_ADDR", "")
+	t.Setenv("PORT", "8080")
+	t.Setenv("EXPORTER_BASE_URL", "")
+	t.Setenv("EXPORTER_SOURCES_JSON", "")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("load port-aware config: %v", err)
+	}
+	if got, want := cfg.ListenAddr, ":8080"; got != want {
+		t.Fatalf("ListenAddr = %q, want %q", got, want)
+	}
+}
+
+func TestVPSDefaultListenAddressIsPreserved(t *testing.T) {
+	t.Setenv("APP_ENV", "test")
+	t.Setenv("DATABASE_URL", "postgres://example")
+	t.Setenv("INTERNAL_SERVICE_TOKEN", "token")
+	t.Setenv("BILLING_INGEST_MODE", "push")
+	t.Setenv("LISTEN_ADDR", "")
+	t.Setenv("PORT", "")
+	t.Setenv("EXPORTER_BASE_URL", "")
+	t.Setenv("EXPORTER_SOURCES_JSON", "")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("load VPS config: %v", err)
+	}
+	if got, want := cfg.ListenAddr, ":8081"; got != want {
+		t.Fatalf("ListenAddr = %q, want %q", got, want)
+	}
+}
+
 func TestSupabaseConnectURIOverridesDatabaseURL(t *testing.T) {
 	t.Setenv("APP_ENV", "test")
 	t.Setenv("DATABASE_URL", "postgres://vps.example/billing")
