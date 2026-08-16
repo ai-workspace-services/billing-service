@@ -1,11 +1,35 @@
 package httpapi
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 )
+
+type testDBPinger func(context.Context) error
+
+func (f testDBPinger) PingContext(ctx context.Context) error {
+	return f(ctx)
+}
+
+func TestReadyzChecksTheSingleConfiguredDatabase(t *testing.T) {
+	handler := New(nil, "", testDBPinger(func(context.Context) error { return nil })).Routes()
+	request := httptest.NewRequest(http.MethodGet, "/readyz", nil)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("expected healthy database to be ready, got %d", response.Code)
+	}
+
+	handler = New(nil, "", testDBPinger(func(context.Context) error { return context.DeadlineExceeded })).Routes()
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected unavailable database to be not ready, got %d", response.Code)
+	}
+}
 
 func TestIngestSnapshotRequiresInternalServiceToken(t *testing.T) {
 	handler := New(nil, "shared-token").Routes()

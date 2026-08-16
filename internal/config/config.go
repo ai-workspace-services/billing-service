@@ -35,6 +35,11 @@ type Config struct {
 	PullEnabled               bool
 	InternalServiceToken      string
 	DatabaseURL               string
+	DatabaseMaxOpenConns      int
+	DatabaseMaxIdleConns      int
+	DatabasePingTimeout       time.Duration
+	DatabaseStartupRetries    int
+	DatabaseRetryInterval     time.Duration
 	ListenAddr                string
 	CollectInterval           time.Duration
 	DefaultRegion             string
@@ -101,17 +106,22 @@ func Load() (Config, error) {
 		databaseURL = supabaseConnectURI
 	}
 	cfg := Config{
-		ImageRef:             imageRef,
-		ImageTag:             imageTag,
-		ImageCommit:          imageCommit,
-		ImageVersion:         imageVersion,
-		ExporterBaseURL:      strings.TrimRight(strings.TrimSpace(os.Getenv("EXPORTER_BASE_URL")), "/"),
-		IngestMode:           strings.ToLower(strings.TrimSpace(os.Getenv("BILLING_INGEST_MODE"))),
-		InternalServiceToken: strings.TrimSpace(os.Getenv("INTERNAL_SERVICE_TOKEN")),
-		DatabaseURL:          databaseURL,
-		ListenAddr:           strings.TrimSpace(os.Getenv("LISTEN_ADDR")),
-		DefaultRegion:        strings.TrimSpace(os.Getenv("DEFAULT_REGION")),
-		SourceRevision:       strings.TrimSpace(os.Getenv("SOURCE_REVISION")),
+		ImageRef:               imageRef,
+		ImageTag:               imageTag,
+		ImageCommit:            imageCommit,
+		ImageVersion:           imageVersion,
+		ExporterBaseURL:        strings.TrimRight(strings.TrimSpace(os.Getenv("EXPORTER_BASE_URL")), "/"),
+		IngestMode:             strings.ToLower(strings.TrimSpace(os.Getenv("BILLING_INGEST_MODE"))),
+		InternalServiceToken:   strings.TrimSpace(os.Getenv("INTERNAL_SERVICE_TOKEN")),
+		DatabaseURL:            databaseURL,
+		DatabaseMaxOpenConns:   int(parseIntEnv("DB_MAX_OPEN_CONNS", 5)),
+		DatabaseMaxIdleConns:   int(parseIntEnv("DB_MAX_IDLE_CONNS", 2)),
+		DatabasePingTimeout:    parseDurationEnv("DB_PING_TIMEOUT", 3*time.Second),
+		DatabaseStartupRetries: int(parseIntEnv("DB_STARTUP_RETRIES", 15)),
+		DatabaseRetryInterval:  parseDurationEnv("DB_RETRY_INTERVAL", 2*time.Second),
+		ListenAddr:             strings.TrimSpace(os.Getenv("LISTEN_ADDR")),
+		DefaultRegion:          strings.TrimSpace(os.Getenv("DEFAULT_REGION")),
+		SourceRevision:         strings.TrimSpace(os.Getenv("SOURCE_REVISION")),
 
 		// AWS FinOps Config
 		AWSAccessKeyID:     strings.TrimSpace(os.Getenv("AWS_ACCESS_KEY_ID")),
@@ -152,6 +162,21 @@ func Load() (Config, error) {
 
 	if cfg.DatabaseURL == "" {
 		return Config{}, fmt.Errorf("DATABASE_URL is required")
+	}
+	if cfg.DatabaseMaxOpenConns < 1 {
+		return Config{}, fmt.Errorf("DB_MAX_OPEN_CONNS must be greater than zero")
+	}
+	if cfg.DatabaseMaxIdleConns < 0 || cfg.DatabaseMaxIdleConns > cfg.DatabaseMaxOpenConns {
+		return Config{}, fmt.Errorf("DB_MAX_IDLE_CONNS must be between 0 and DB_MAX_OPEN_CONNS")
+	}
+	if cfg.DatabasePingTimeout <= 0 {
+		return Config{}, fmt.Errorf("DB_PING_TIMEOUT must be greater than zero")
+	}
+	if cfg.DatabaseStartupRetries < 1 {
+		return Config{}, fmt.Errorf("DB_STARTUP_RETRIES must be greater than zero")
+	}
+	if cfg.DatabaseRetryInterval < 0 {
+		return Config{}, fmt.Errorf("DB_RETRY_INTERVAL must not be negative")
 	}
 	if cfg.InternalServiceToken == "" {
 		return Config{}, fmt.Errorf("INTERNAL_SERVICE_TOKEN is required")
@@ -294,6 +319,18 @@ func parseIntEnv(key string, fallback int64) int64 {
 		return fallback
 	}
 	parsed, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil {
+		return fallback
+	}
+	return parsed
+}
+
+func parseDurationEnv(key string, fallback time.Duration) time.Duration {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return fallback
+	}
+	parsed, err := time.ParseDuration(raw)
 	if err != nil {
 		return fallback
 	}

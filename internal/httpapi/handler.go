@@ -2,11 +2,13 @@ package httpapi
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"billing-service/internal/model"
 	"billing-service/internal/service"
@@ -15,16 +17,26 @@ import (
 type Handler struct {
 	service *service.Service
 	token   string
+	db      dbPinger
 }
 
-func New(svc *service.Service, token string) *Handler {
-	return &Handler{service: svc, token: strings.TrimSpace(token)}
+type dbPinger interface {
+	PingContext(context.Context) error
+}
+
+func New(svc *service.Service, token string, db ...dbPinger) *Handler {
+	h := &Handler{service: svc, token: strings.TrimSpace(token)}
+	if len(db) > 0 {
+		h.db = db[0]
+	}
+	return h
 }
 
 func (h *Handler) Routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/ping", h.ping)
 	mux.HandleFunc("/healthz", h.healthz)
+	mux.HandleFunc("/readyz", h.readyz)
 	mux.HandleFunc("/v1/status", h.status)
 	mux.HandleFunc("/v1/jobs/collect-and-rate", h.collectAndRate)
 	mux.HandleFunc("/v1/jobs/reconcile", h.reconcile)
@@ -149,6 +161,29 @@ func (h *Handler) healthz(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, status, map[string]any{
 		"status":  map[bool]string{true: "ok", false: "degraded"}[ok],
 		"message": message,
+	})
+}
+
+func (h *Handler) readyz(w http.ResponseWriter, r *http.Request) {
+	if h.db == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+			"status":   "not_ready",
+			"database": "not_configured",
+		})
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+	defer cancel()
+	if err := h.db.PingContext(ctx); err != nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+			"status":   "not_ready",
+			"database": "unavailable",
+		})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":   "ready",
+		"database": "ok",
 	})
 }
 
