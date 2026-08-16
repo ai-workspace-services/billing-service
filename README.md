@@ -10,11 +10,18 @@ available only as an explicit compatibility mode.
 
 Deployment note:
 
-- `billing-service` must point `DATABASE_URL` at the already provisioned
-  `accounts.svc.plus` database
+- `billing-service` must point either `SUPABASE_CONNECT_URI` (Supabase Cloud)
+  or `DATABASE_URL` (VPS/self-hosted fallback) at the already provisioned
+  `accounts.svc.plus` database. `SUPABASE_CONNECT_URL` is accepted only as a
+  compatibility alias.
 - it should not be used to create or bootstrap schema on production hosts
 - the accounting tables it reads and writes are expected to exist before the
   service starts
+
+For Supabase Cloud runtime, inject the Session pooler URI through
+`SUPABASE_CONNECT_URI`. Keep the migration/backup-only `DATABASE_DIRECT_URL`
+outside the service runtime; `DATABASE_SESSION_POOLER_URL` is the Vault source
+used to populate the runtime URI.
 
 ## Endpoints
 
