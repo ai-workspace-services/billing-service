@@ -112,6 +112,7 @@ jobs:
 
   publish_artifact_registry:
     name: Publish Cloud Run image to Artifact Registry
+    needs: build
     if: ${{ github.event_name == 'push' && github.ref_type == 'tag' && contains(github.ref_name, 'daily-build-') }}
     needs: build
     runs-on: ubuntu-latest
