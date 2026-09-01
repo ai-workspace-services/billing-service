@@ -54,6 +54,10 @@ jobs:
 
   build:
     needs: prep
+    # A production snapshot promotion only needs the independent Artifact
+    # Registry job below. Skipping the GHCR build avoids requesting the
+    # tag-bound production Vault role from its main-branch dispatch.
+    if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.deployment_environment == 'prod' && inputs.source_ref != '' && inputs.image_tag != '') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
