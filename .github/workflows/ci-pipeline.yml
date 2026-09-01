@@ -22,6 +22,16 @@ on:
           - sit
           - uat
           - prod
+      source_ref:
+        description: Immutable source ref to build when production promotion is dispatched from main
+        required: false
+        default: ""
+        type: string
+      image_tag:
+        description: Artifact Registry tag to publish for an explicit promotion
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: read
@@ -47,6 +57,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_ref || github.ref }}
 
       # 不写 path: —— 用 vault-action 默认的 jwt mount。
       #
@@ -116,7 +128,7 @@ jobs:
     # Production snapshots use immutable v* tags; UAT snapshots use
     # daily-build-* tags. Both must publish the Cloud Run image consumed by
     # platform-ops-toolkit.
-    if: ${{ github.event_name == 'push' && github.ref_type == 'tag' }}
+    if: ${{ (github.event_name == 'push' && github.ref_type == 'tag') || (github.event_name == 'workflow_dispatch' && inputs.deployment_environment == 'prod' && inputs.source_ref != '' && inputs.image_tag != '') }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -124,6 +136,8 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_ref || github.ref }}
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -153,7 +167,7 @@ jobs:
           file: Dockerfile
           platforms: linux/amd64
           push: true
-          tags: asia-northeast1-docker.pkg.dev/xworktech/serverless/billing-service:${{ github.ref_name }}
+          tags: asia-northeast1-docker.pkg.dev/xworktech/serverless/billing-service:${{ inputs.image_tag || github.ref_name }}
 
   release:
     name: Publish release manifest and assets
