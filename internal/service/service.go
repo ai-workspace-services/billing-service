@@ -44,7 +44,7 @@ func New(cfg config.Config, source windowSource, repo repository.Repository) *Se
 }
 
 func (s *Service) Start(ctx context.Context) {
-	if !s.pullEnabled() {
+	if !s.cfg.DatabaseRuntime.MayRunBackgroundWriters() || !s.pullEnabled() {
 		return
 	}
 	go func() {

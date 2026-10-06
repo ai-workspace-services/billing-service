@@ -42,6 +42,9 @@ func NewFinOpsSyncer(repo repository.Repository, logger *slog.Logger, cfg config
 
 // Start begins the background synchronization process.
 func (s *FinOpsSyncer) Start(ctx context.Context) {
+	if !s.cfg.DatabaseRuntime.MayRunBackgroundWriters() {
+		return
+	}
 	s.log.Info("Starting FinOps multi-cloud billing syncer")
 
 	ticker := time.NewTicker(24 * time.Hour)
@@ -330,7 +333,7 @@ func (s *FinOpsSyncer) syncAzure(ctx context.Context) error {
 				if amount == 0 {
 					continue
 				}
-				
+
 				svc := "Unknown"
 				if prop.Properties.MeterDetails != nil && prop.Properties.MeterDetails.MeterCategory != nil {
 					svc = *prop.Properties.MeterDetails.MeterCategory
@@ -339,9 +342,9 @@ func (s *FinOpsSyncer) syncAzure(ctx context.Context) error {
 				if prop.Properties.ResourceLocation != nil {
 					loc = *prop.Properties.ResourceLocation
 				}
-				
+
 				aggs[key{Service: svc, Region: loc}] += amount
-				
+
 			case *armconsumption.ModernUsageDetail:
 				if prop.Properties == nil || prop.Properties.CostInBillingCurrency == nil {
 					continue
@@ -350,7 +353,7 @@ func (s *FinOpsSyncer) syncAzure(ctx context.Context) error {
 				if amount == 0 {
 					continue
 				}
-				
+
 				svc := "Unknown"
 				if prop.Properties.MeterCategory != nil {
 					svc = *prop.Properties.MeterCategory
@@ -359,7 +362,7 @@ func (s *FinOpsSyncer) syncAzure(ctx context.Context) error {
 				if prop.Properties.ResourceLocation != nil {
 					loc = *prop.Properties.ResourceLocation
 				}
-				
+
 				aggs[key{Service: svc, Region: loc}] += amount
 			}
 		}
