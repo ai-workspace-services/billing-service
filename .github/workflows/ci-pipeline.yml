@@ -118,6 +118,7 @@ jobs:
       # 与"role 不存在"和"绑定不匹配"完全同形, 很容易误判成权限配置问题。
       - name: Authenticate to Vault
         id: vault
+        if: needs.prep.outputs.push_image == 'true'
         uses: hashicorp/vault-action@v4
         with:
           url: https://vault.svc.plus
@@ -125,6 +126,7 @@ jobs:
           jwtGithubAudience: vault
           method: jwt
           path: jwt
+          exportEnv: false
           secrets: |
             kv/data/CICD GHCR_USERNAME | GHCR_USERNAME ;
             kv/data/CICD GHCR_TOKEN | GHCR_TOKEN ;
