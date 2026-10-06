@@ -39,6 +39,51 @@ permissions:
   id-token: write
 
 jobs:
+  managed_database_runtime:
+    name: Managed Database Runtime (PostgreSQL 17)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - name: Check out Billing owner
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ inputs.source_ref || github.ref }}
+      - name: Read fixed Accounts native schema fixture
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: ai-workspace-services/accounts
+          ref: 7b3112eb09ec1e7fbb9d35f25029818d8500980f
+          path: .runtime-fixture/accounts
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version-file: go.mod
+      - name: Prepare isolated native account fixture
+        env:
+          PGPASSWORD: postgres
+        run: |
+          sudo apt-get update && sudo apt-get install -y postgresql-client
+          createdb --host localhost --port 5432 --username postgres account
+      - name: Qualify readonly startup and standby isolation
+        env:
+          BILLING_MANAGED_RUNTIME_TEST_DSN: postgres://postgres:postgres@localhost:5432/account?sslmode=disable
+          BILLING_NATIVE_ACCOUNTS_SQL: ${{ github.workspace }}/.runtime-fixture/accounts/sql/init/accounts-native.sql
+        run: go test -v ./internal/config ./internal/dbruntime ./internal/service ./internal/httpapi ./cmd/billing-service
+      - name: Compile the complete prebuilt server package
+        run: CGO_ENABLED=0 go build -o "$RUNNER_TEMP/billing-runtime" ./cmd/billing-service
+
   prep:
     runs-on: ubuntu-latest
     outputs:
@@ -53,7 +98,7 @@ jobs:
         run: bash ./scripts/github-actions/resolve-workflow-inputs.sh >> "$GITHUB_OUTPUT"
 
   build:
-    needs: prep
+    needs: [prep, managed_database_runtime]
     # A production snapshot promotion only needs the independent Artifact
     # Registry job below. Skipping the GHCR build avoids requesting the
     # tag-bound production Vault role from its main-branch dispatch.
@@ -73,6 +118,7 @@ jobs:
       # 与"role 不存在"和"绑定不匹配"完全同形, 很容易误判成权限配置问题。
       - name: Authenticate to Vault
         id: vault
+        if: needs.prep.outputs.push_image == 'true'
         uses: hashicorp/vault-action@v4
         with:
           url: https://vault.svc.plus
@@ -80,6 +126,7 @@ jobs:
           jwtGithubAudience: vault
           method: jwt
           path: jwt
+          exportEnv: false
           secrets: |
             kv/data/CICD GHCR_USERNAME | GHCR_USERNAME ;
             kv/data/CICD GHCR_TOKEN | GHCR_TOKEN ;
@@ -127,6 +174,7 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
 
   publish_artifact_registry:
+    needs: managed_database_runtime
     name: Publish Cloud Run image to Artifact Registry
     # Production snapshots use immutable v* tags; UAT snapshots use
     # daily-build-* tags. Both must publish the Cloud Run image consumed by

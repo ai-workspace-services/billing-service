@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"billing-service/internal/dbruntime"
 	"github.com/joho/godotenv"
 )
 
@@ -22,6 +23,7 @@ type ExporterSource struct {
 }
 
 type Config struct {
+	DatabaseRuntime dbruntime.Config
 	ImageRef        string
 	ImageTag        string
 	ImageCommit     string
@@ -72,6 +74,11 @@ type Config struct {
 	ArrearsSweepInterval    time.Duration
 }
 
+// RuntimeImageMetadata uses the same IMAGE-derived fields as Service.Ping.
+func (c Config) RuntimeImageMetadata() map[string]any {
+	return map[string]any{"image": c.ImageRef, "tag": c.ImageTag, "commit": c.ImageCommit, "version": c.ImageVersion}
+}
+
 type rawExporterSource struct {
 	SourceID       string `json:"source_id"`
 	BaseURL        string `json:"base_url"`
@@ -94,6 +101,10 @@ func Load() (Config, error) {
 
 	imageRef := strings.TrimSpace(os.Getenv("IMAGE"))
 	imageTag, imageCommit, imageVersion := parseImageRef(imageRef)
+	runtime, managedDSN, err := dbruntime.FromEnvironment()
+	if err != nil {
+		return Config{}, err
+	}
 	databaseURL := strings.TrimSpace(os.Getenv("DATABASE_URL"))
 	// SUPABASE_CONNECT_URI is the canonical PostgreSQL connection URI for
 	// Supabase runtime use. SUPABASE_CONNECT_URL is accepted as a transition
@@ -102,10 +113,13 @@ func Load() (Config, error) {
 	if supabaseConnectURI == "" {
 		supabaseConnectURI = strings.TrimSpace(os.Getenv("SUPABASE_CONNECT_URL"))
 	}
-	if supabaseConnectURI != "" {
+	if runtime.Managed() {
+		databaseURL = managedDSN
+	} else if supabaseConnectURI != "" {
 		databaseURL = supabaseConnectURI
 	}
 	cfg := Config{
+		DatabaseRuntime:        runtime,
 		ImageRef:               imageRef,
 		ImageTag:               imageTag,
 		ImageCommit:            imageCommit,

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"billing-service/internal/config"
+	"billing-service/internal/dbruntime"
 	"billing-service/internal/exporter"
 	"billing-service/internal/httpapi"
 	"billing-service/internal/observability"
@@ -32,6 +33,21 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	if err := runBilling(ctx, cfg); err != nil {
+		log.Fatal(err)
+	}
+}
+
+func runBilling(ctx context.Context, cfg config.Config) error {
+	if cfg.DatabaseRuntime.Managed() {
+		reviewed, dsn, err := dbruntime.FromEnvironment()
+		if err != nil {
+			return err
+		}
+		if reviewed != cfg.DatabaseRuntime || dsn != cfg.DatabaseURL {
+			return fmt.Errorf("managed Billing runtime differs from explicit deployment controls")
+		}
+	}
 	shutdownTracing, err := observability.Configure(ctx, "web-saas-billing")
 	if err != nil {
 		log.Printf("OTLP tracing disabled: %v", err)
@@ -43,49 +59,70 @@ func main() {
 		}()
 	}
 
-	db, err := openDatabase(ctx, cfg)
-	if err != nil {
-		log.Fatal(err)
+	var runtimeHandler http.Handler
+	if cfg.DatabaseRuntime.Role == "standby" {
+		runtimeHandler = cfg.DatabaseRuntime.Wrap(nil, cfg.RuntimeImageMetadata)
+	} else {
+		db, err := openDatabase(ctx, cfg)
+		if err != nil {
+			return err
+		}
+		defer db.Close()
+
+		repo := repository.NewPostgres(db)
+		svc := service.New(
+			cfg,
+			exporter.NewClient(cfg.InternalServiceToken),
+			repo,
+		)
+		if cfg.DatabaseRuntime.Managed() {
+			if err := verifyNativeRuntime(ctx, db); err != nil {
+				return err
+			}
+			cfg.DatabaseRuntime.SchemaVersion = 2026100701
+		}
+
+		svc.Start(ctx)
+
+		logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{})).With(
+			observability.RuntimeLogAttrs("web-saas-billing")...,
+		)
+		slog.SetDefault(logger)
+
+		// Initialize and start FinOps Syncer (Cloud Billing)
+		if cfg.DatabaseRuntime.MayRunBackgroundWriters() {
+			finopsSyncer := service.NewFinOpsSyncer(repo, logger, cfg)
+			go finopsSyncer.Start(ctx)
+			suspendSyncer := service.NewSuspendSyncer(repo, cfg.ArrearsSuspendThreshold, cfg.ArrearsSweepInterval, logger)
+			go suspendSyncer.Start(ctx)
+		}
+
+		runtimeHandler = cfg.DatabaseRuntime.Wrap(httpapi.New(svc, cfg.InternalServiceToken, db).Routes(), cfg.RuntimeImageMetadata)
 	}
-	defer db.Close()
-
-	repo := repository.NewPostgres(db)
-	svc := service.New(
-		cfg,
-		exporter.NewClient(cfg.InternalServiceToken),
-		repo,
-	)
-	svc.Start(ctx)
-
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{})).With(
-		observability.RuntimeLogAttrs("web-saas-billing")...,
-	)
-	slog.SetDefault(logger)
-
-	// Initialize and start FinOps Syncer (Cloud Billing)
-	finopsSyncer := service.NewFinOpsSyncer(repo, logger, cfg)
-	go finopsSyncer.Start(ctx)
-
-	suspendSyncer := service.NewSuspendSyncer(repo, cfg.ArrearsSuspendThreshold, cfg.ArrearsSweepInterval, logger)
-	go suspendSyncer.Start(ctx)
+	logger := slog.Default()
 
 	server := &http.Server{
 		Addr: cfg.ListenAddr,
 		Handler: otelhttp.NewHandler(
-			observability.RequestLogger(logger, httpapi.New(svc, cfg.InternalServiceToken, db).Routes()),
+			observability.RequestLogger(logger, runtimeHandler),
 			"billing.request",
 		),
 	}
 
 	go func() {
 		<-ctx.Done()
-		_ = server.Shutdown(context.Background())
+		shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if server.Shutdown(shutdown) != nil {
+			_ = server.Close()
+		}
 	}()
 
 	log.Printf("billing-service listening on %s", cfg.ListenAddr)
 	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		log.Fatal(err)
+		return err
 	}
+	return nil
 }
 
 // openDatabase validates the one configured primary before the HTTP server is
