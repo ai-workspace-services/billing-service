@@ -1,0 +1,15 @@
+{
+  "format": 1,
+  "owner": "ai-workspace-services/billing-service",
+  "migration_file": "sql/migrations/2026100701_cloud_vendor_costs.up.sql",
+  "migration_sha256": "a7133f3ef2ea9013a055cfd1442a7488d2b837f289e0f5d9b61624d4fde9bc53",
+  "expected_schema_version": 2026100601,
+  "target_schema_version": 2026100701,
+  "business_tables": [
+    "cloud_vendor_costs"
+  ],
+  "reference_file": "sql/billing-service-schema.sql",
+  "reference_sha256": "7faf46295b419102e4bbcb8cef67db14ba3beef1d46ee945fd4acfb86541c39b",
+  "no_business_seeds": true,
+  "database_cutover_approved": false
+}
