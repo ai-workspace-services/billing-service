@@ -27,3 +27,7 @@ Billing 与 Accounts 使用相同的显式环境变量合同，入口和后台�
 CI 使用新建的临时 PostgreSQL 17 数据库、固定 Accounts 原生 SQL SHA256 与 Billing SQL SHA256。仅 SELECT 的应用角色启动后，所有业务行、schema 检查点、列、约束、索引与函数摘要必须完全相同；待机使用不可达数据库仍须正常提供探针并拒绝业务请求。镜像发布依赖此验证。生产验收仍需实际固定镜像部署、来源冻结与全业务凭证，代码或 CI 通过不能视为生产切换完成。
 
 未配置角色的原有路径标记为 LEGACY；满足实际部署和回退验证门槛后再移除。任何回退都不得自动恢复已经过时的 PROD Supabase 数据读取。
+
+## Standby configuration credentials
+
+The `standby` role can load without `INTERNAL_SERVICE_TOKEN`: it creates no business handler/exporter and rejects every business request. `primary` and the existing unmanaged business role still require that token. A standby qualification uses a password-free, unreachable loopback database URL and no production service credential. This change does not enable business requests, database access, background writers or cutover.

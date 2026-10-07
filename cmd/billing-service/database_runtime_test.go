@@ -37,6 +37,9 @@ func runtimeFixtureConfig(t *testing.T, role, dsn string) config.Config {
 	t.Setenv("SUPABASE_CONNECT_URI", "")
 	t.Setenv("SUPABASE_CONNECT_URL", "")
 	t.Setenv("INTERNAL_SERVICE_TOKEN", "synthetic-runtime-fixture")
+	if role == dbruntime.Standby {
+		t.Setenv("INTERNAL_SERVICE_TOKEN", "")
+	}
 	t.Setenv("LISTEN_ADDR", addr)
 	t.Setenv("IMAGE", "ghcr.io/ai-workspace-services/billing-service:sha-"+strings.Repeat("b", 40))
 	t.Setenv("BILLING_INGEST_MODE", "push")
