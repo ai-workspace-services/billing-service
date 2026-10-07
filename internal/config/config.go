@@ -197,7 +197,10 @@ func Load() (Config, error) {
 	if cfg.DatabaseRetryInterval < 0 {
 		return Config{}, fmt.Errorf("DB_RETRY_INTERVAL must not be negative")
 	}
-	if cfg.InternalServiceToken == "" {
+	// Standby constructs no business handler or exporter and rejects every
+	// business request. Requiring a real service token there would distribute
+	// an unused credential and prevent the isolated runtime qualification.
+	if cfg.InternalServiceToken == "" && runtime.Role != dbruntime.Standby {
 		return Config{}, fmt.Errorf("INTERNAL_SERVICE_TOKEN is required")
 	}
 
