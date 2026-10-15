@@ -25,10 +25,22 @@ func verifyNativeRuntime(ctx context.Context, db *sql.DB) error {
 	if tx.QueryRowContext(ctx, `SELECT current_database(),current_setting('server_version_num')::int`).Scan(&database, &pgVersion) != nil || database != "account" || pgVersion < 170000 || pgVersion >= 180000 {
 		return errors.New("Billing native runtime requires PostgreSQL17 account database")
 	}
-	if tx.QueryRowContext(ctx, `SELECT count(*),coalesce(min(version),0),coalesce(bool_or(dirty),true) FROM public.schema_migrations`).Scan(&count, &version, &dirty) != nil || count != 1 || version != 2026100701 || dirty {
+	if tx.QueryRowContext(ctx, `SELECT count(*),coalesce(min(version),0),coalesce(bool_or(dirty),true) FROM public.schema_migrations`).Scan(&count, &version, &dirty) != nil || count != 1 || dirty {
 		return errors.New("Billing native runtime requires the exact clean checkpoint")
 	}
-	if tx.QueryRowContext(ctx, `SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public' AND c.relkind IN ('r','p','v','m','f') AND c.relname NOT IN ('schema_migrations','system_release_checkpoints')`).Scan(&count) != nil || count != 53 {
+	// Keep the original reviewed checkpoint and explicitly admit the Accounts
+	// native 2026101502 artifact (63 tables) plus Billing's owned cost table.
+	// Unknown versions and unexpected shared relations still fail closed.
+	expectedRelations := 0
+	switch version {
+	case 2026100701:
+		expectedRelations = 53
+	case 2026101502:
+		expectedRelations = 64
+	default:
+		return errors.New("Billing native runtime requires a reviewed clean checkpoint")
+	}
+	if tx.QueryRowContext(ctx, `SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public' AND c.relkind IN ('r','p','v','m','f') AND c.relname NOT IN ('schema_migrations','system_release_checkpoints')`).Scan(&count) != nil || count != expectedRelations {
 		return errors.New("Billing native runtime shared table scope differs")
 	}
 	expected := map[string]string{"id": "uuid:false", "provider": "character varying(50):false", "account_id": "character varying(100):false",
