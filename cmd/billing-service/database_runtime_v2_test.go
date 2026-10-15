@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
+	"net/http"
 	"net/url"
 	"os"
 	"testing"
@@ -62,5 +64,17 @@ func TestNativeV2CheckpointPostgres(t *testing.T) {
 	}
 	if err = verifyNativeRuntime(ctx, db); err != nil {
 		t.Fatal(err)
+	}
+	cfg := runtimeFixtureConfig(t, "primary", dsn)
+	base, stop := startRuntimeFixture(t, cfg)
+	defer stop()
+	response, err := http.Get(base + "/api/ping")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	var ping map[string]any
+	if json.NewDecoder(response.Body).Decode(&ping) != nil || ping["schema_version"] != float64(2026101502) {
+		t.Fatal("runtime reported a different native checkpoint")
 	}
 }

@@ -79,7 +79,9 @@ func runBilling(ctx context.Context, cfg config.Config) error {
 			if err := verifyNativeRuntime(ctx, db); err != nil {
 				return err
 			}
-			cfg.DatabaseRuntime.SchemaVersion = 2026100701
+			if err := db.QueryRowContext(ctx, "SELECT version FROM public.schema_migrations WHERE dirty=false").Scan(&cfg.DatabaseRuntime.SchemaVersion); err != nil {
+				return fmt.Errorf("read verified native checkpoint: %w", err)
+			}
 		}
 
 		svc.Start(ctx)
