@@ -183,7 +183,7 @@ jobs:
     name: Publish Cloud Run image to Artifact Registry
     # GHCR/Selfhost snapshots do not depend on Google Cloud. Cloud Run
     # publication is a separate, explicitly requested promotion.
-    if: ${{ inputs.publish_artifact_registry == true && ((github.event_name == 'push' && github.ref_type == 'tag') || (github.event_name == 'workflow_dispatch' && inputs.deployment_environment == 'prod' && inputs.source_ref != '' && inputs.image_tag != '')) }}
+    if: ${{ inputs.publish_artifact_registry == true && github.event_name == 'workflow_dispatch' && (github.ref_type == 'tag' || (inputs.deployment_environment == 'prod' && inputs.source_ref != '' && inputs.image_tag != '')) }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
