@@ -146,3 +146,20 @@ func TestParseImageRefRejectsIncompleteSha(t *testing.T) {
 		t.Fatalf("expected partial parse failure, got tag=%q commit=%q version=%q", tag, commit, version)
 	}
 }
+
+func TestParseImageRefWithDigest(t *testing.T) {
+	const sha = "0123456789abcdef0123456789abcdef01234567"
+	digest := "@sha256:" + strings.Repeat("a", 64)
+	for _, prefix := range []string{"sha-", ""} {
+		tag, commit, version := parseImageRef("registry.example.com:5000/billing-service:" + prefix + sha + digest)
+		if tag != prefix+sha || commit != sha || version != sha {
+			t.Fatalf("digest-qualified metadata differs: %q %q %q", tag, commit, version)
+		}
+	}
+	for _, ref := range []string{"registry.example.com:5000/billing-service" + digest, "billing-service" + digest} {
+		tag, commit, version := parseImageRef(ref)
+		if tag != "" || commit != "" || version != "" {
+			t.Fatalf("digest-only image invented tag or source identity: %q %q %q", tag, commit, version)
+		}
+	}
+}
