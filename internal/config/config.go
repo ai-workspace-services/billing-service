@@ -258,8 +258,11 @@ func parseImageRef(imageRef string) (tag, commit, version string) {
 	if trimmed == "" {
 		return "", "", ""
 	}
+	// The digest selects immutable bytes; source identity remains in the tag.
+	// Do not parse the sha256 separator (or a registry port) as an image tag.
+	trimmed, _, _ = strings.Cut(trimmed, "@")
 	colon := strings.LastIndex(trimmed, ":")
-	if colon < 0 || colon == len(trimmed)-1 {
+	if colon <= strings.LastIndex(trimmed, "/") || colon == len(trimmed)-1 {
 		return "", "", ""
 	}
 	tag = trimmed[colon+1:]
