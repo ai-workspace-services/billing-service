@@ -109,6 +109,11 @@ func TestNativeCheckpointCompatibility(t *testing.T) {
 	}{
 		{"legacy", checkpointFixture{version: 2026100701, migrationRows: 1, relations: 53}, 2026100701},
 		{"prod_v2", checkpointFixture{version: 2026101502, migrationRows: 1, relations: 64}, 2026101502},
+		{"prod_v2_email", checkpointFixture{version: 2026101703, migrationRows: 1, relations: 73}, 2026101703},
+		{"email_dirty", checkpointFixture{version: 2026101703, migrationRows: 1, relations: 73, dirty: true}, 0},
+		{"email_wrong_scope", checkpointFixture{version: 2026101703, migrationRows: 1, relations: 64}, 0},
+		{"email_column_drift", checkpointFixture{version: 2026101703, migrationRows: 1, relations: 73, badColumns: true}, 0},
+		{"unreviewed_email_next", checkpointFixture{version: 2026101704, migrationRows: 1, relations: 73}, 0},
 		{"dirty_v2", checkpointFixture{version: 2026101502, migrationRows: 1, relations: 64, dirty: true}, 0},
 		{"unknown", checkpointFixture{version: 2026101503, migrationRows: 1, relations: 64}, 0},
 		{"missing_checkpoint", checkpointFixture{relations: 64}, 0},
