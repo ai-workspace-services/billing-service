@@ -13,6 +13,11 @@ on:
       - "*daily-build-*"
   workflow_dispatch:
     inputs:
+      publish_artifact_registry:
+        description: Explicitly publish the Cloud Run image to Google Artifact Registry
+        required: false
+        default: false
+        type: boolean
       deployment_environment:
         description: Deployment environment
         required: true
@@ -176,10 +181,9 @@ jobs:
   publish_artifact_registry:
     needs: managed_database_runtime
     name: Publish Cloud Run image to Artifact Registry
-    # Production snapshots use immutable v* tags; UAT snapshots use
-    # daily-build-* tags. Both must publish the Cloud Run image consumed by
-    # platform-ops-toolkit.
-    if: ${{ (github.event_name == 'push' && github.ref_type == 'tag') || (github.event_name == 'workflow_dispatch' && inputs.deployment_environment == 'prod' && inputs.source_ref != '' && inputs.image_tag != '') }}
+    # GHCR/Selfhost snapshots do not depend on Google Cloud. Cloud Run
+    # publication is a separate, explicitly requested promotion.
+    if: ${{ inputs.publish_artifact_registry == true && github.event_name == 'workflow_dispatch' && (github.ref_type == 'tag' || (inputs.deployment_environment == 'prod' && inputs.source_ref != '' && inputs.image_tag != '')) }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
