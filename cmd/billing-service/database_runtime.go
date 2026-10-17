@@ -27,6 +27,10 @@ func nativeCheckpointRelations(version, count int, dirty bool) (int, error) {
 		return 53, nil
 	case 2026101502:
 		return 64, nil
+	case 2026101703:
+		// Accounts' reviewed email preferences/campaign catalog adds nine
+		// business relations to 2026101502. Migration receipts are metadata.
+		return 73, nil
 	default:
 		return 0, errors.New("Billing native runtime requires a reviewed clean checkpoint")
 	}
@@ -53,7 +57,7 @@ func verifyNativeRuntimeCheckpoint(ctx context.Context, db *sql.DB) (uint, error
 	if err != nil {
 		return 0, err
 	}
-	if tx.QueryRowContext(ctx, `SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public' AND c.relkind IN ('r','p','v','m','f') AND c.relname NOT IN ('schema_migrations','system_release_checkpoints')`).Scan(&count) != nil || count != expectedRelations {
+	if tx.QueryRowContext(ctx, `SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public' AND c.relkind IN ('r','p','v','m','f') AND c.relname NOT IN ('schema_migrations','system_release_checkpoints','accounts_controlled_migration_history')`).Scan(&count) != nil || count != expectedRelations {
 		return 0, errors.New("Billing native runtime shared table scope differs")
 	}
 	expected := map[string]string{"id": "uuid:false", "provider": "character varying(50):false", "account_id": "character varying(100):false",
