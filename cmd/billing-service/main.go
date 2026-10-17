@@ -76,10 +76,11 @@ func runBilling(ctx context.Context, cfg config.Config) error {
 			repo,
 		)
 		if cfg.DatabaseRuntime.Managed() {
-			if err := verifyNativeRuntime(ctx, db); err != nil {
+			schemaVersion, err := verifyNativeRuntimeCheckpoint(ctx, db)
+			if err != nil {
 				return err
 			}
-			cfg.DatabaseRuntime.SchemaVersion = 2026100701
+			cfg.DatabaseRuntime.SchemaVersion = schemaVersion
 		}
 
 		svc.Start(ctx)
