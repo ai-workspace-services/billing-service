@@ -27,7 +27,7 @@ func nativeCheckpointRelations(version, count int, dirty bool) (int, error) {
 		return 53, nil
 	case 2026101502:
 		return 64, nil
-	case 2026101703:
+	case 2026101703, 2026101901, 2026101902:
 		// Accounts' reviewed email preferences/campaign catalog adds nine
 		// business relations to 2026101502. Migration receipts are metadata.
 		return 73, nil
@@ -56,6 +56,24 @@ func verifyNativeRuntimeCheckpoint(ctx context.Context, db *sql.DB) (uint, error
 	expectedRelations, err := nativeCheckpointRelations(version, count, dirty)
 	if err != nil {
 		return 0, err
+	}
+	if version == 2026101901 || version == 2026101902 {
+		for _, step := range []struct {
+			from, to int
+			hash     string
+		}{
+			{2026101703, 2026101901, "b9fee298512e7d888fe619917c8238120f0e227f4ea348e59397d074c41f878d"},
+			{2026101901, 2026101902, "53f9aaf7c56a14fd7c132c6649b79582cd2063f8903b94efb4e23cbf4895437c"},
+		} {
+			if step.to > version {
+				continue
+			}
+			var from int
+			var hash string
+			if err := tx.QueryRowContext(ctx, `SELECT from_version,sql_sha256 FROM public.accounts_controlled_migration_history WHERE to_version=$1`, step.to).Scan(&from, &hash); err != nil || from != step.from || hash != step.hash {
+				return 0, errors.New("Billing catalog migration receipt differs")
+			}
+		}
 	}
 	if tx.QueryRowContext(ctx, `SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public' AND c.relkind IN ('r','p','v','m','f') AND c.relname NOT IN ('schema_migrations','system_release_checkpoints','accounts_controlled_migration_history')`).Scan(&count) != nil || count != expectedRelations {
 		return 0, errors.New("Billing native runtime shared table scope differs")

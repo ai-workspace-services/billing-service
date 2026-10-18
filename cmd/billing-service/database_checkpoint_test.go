@@ -15,6 +15,7 @@ import (
 type checkpointFixture struct {
 	version, migrationRows, relations int64
 	dirty, badColumns, committed      bool
+	badReceipt                        bool
 }
 
 type checkpointConnector struct{ f *checkpointFixture }
@@ -66,11 +67,20 @@ func (r *checkpointRows) Next(dest []driver.Value) error {
 	r.values = r.values[1:]
 	return nil
 }
-func (c checkpointConn) QueryContext(_ context.Context, q string, _ []driver.NamedValue) (driver.Rows, error) {
+func (c checkpointConn) QueryContext(_ context.Context, q string, args []driver.NamedValue) (driver.Rows, error) {
 	rows := func(columns []string, values ...[]driver.Value) (driver.Rows, error) {
 		return &checkpointRows{columns, values}, nil
 	}
 	switch {
+	case strings.Contains(q, "FROM public.accounts_controlled_migration_history"):
+		from, hash := int64(2026101703), "b9fee298512e7d888fe619917c8238120f0e227f4ea348e59397d074c41f878d"
+		if args[0].Value == int64(2026101902) {
+			from, hash = 2026101901, "53f9aaf7c56a14fd7c132c6649b79582cd2063f8903b94efb4e23cbf4895437c"
+		}
+		if c.f.badReceipt {
+			hash = "wrong"
+		}
+		return rows([]string{"from_version", "sql_sha256"}, []driver.Value{from, hash})
 	case strings.HasPrefix(q, "SELECT current_database()"):
 		return rows([]string{"database", "pg_version"}, []driver.Value{"account", int64(170000)})
 	case strings.Contains(q, "FROM public.schema_migrations"):
@@ -110,6 +120,10 @@ func TestNativeCheckpointCompatibility(t *testing.T) {
 		{"legacy", checkpointFixture{version: 2026100701, migrationRows: 1, relations: 53}, 2026100701},
 		{"prod_v2", checkpointFixture{version: 2026101502, migrationRows: 1, relations: 64}, 2026101502},
 		{"prod_v2_email", checkpointFixture{version: 2026101703, migrationRows: 1, relations: 73}, 2026101703},
+		{"catalog_first", checkpointFixture{version: 2026101901, migrationRows: 1, relations: 73}, 2026101901},
+		{"catalog_latest", checkpointFixture{version: 2026101902, migrationRows: 1, relations: 73}, 2026101902},
+		{"catalog_bad_receipt", checkpointFixture{version: 2026101902, migrationRows: 1, relations: 73, badReceipt: true}, 0},
+		{"catalog_future", checkpointFixture{version: 2026101903, migrationRows: 1, relations: 73}, 0},
 		{"email_dirty", checkpointFixture{version: 2026101703, migrationRows: 1, relations: 73, dirty: true}, 0},
 		{"email_wrong_scope", checkpointFixture{version: 2026101703, migrationRows: 1, relations: 64}, 0},
 		{"email_column_drift", checkpointFixture{version: 2026101703, migrationRows: 1, relations: 73, badColumns: true}, 0},
