@@ -31,6 +31,10 @@ func nativeCheckpointRelations(version, count int, dirty bool) (int, error) {
 		// Accounts' reviewed email preferences/campaign catalog adds nine
 		// business relations to 2026101502. Migration receipts are metadata.
 		return 73, nil
+	case 2026102002:
+		// Accounts' pinned native artifact adds subscription_lifecycle_states
+		// and team_agent_enrollments. Billing's owned table contract is unchanged.
+		return 75, nil
 	default:
 		return 0, errors.New("Billing native runtime requires a reviewed clean checkpoint")
 	}
