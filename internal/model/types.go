@@ -11,10 +11,14 @@ type Sample struct {
 }
 
 type Snapshot struct {
-	CollectedAt time.Time `json:"collected_at"`
-	NodeID      string    `json:"node_id"`
-	Env         string    `json:"env"`
-	Samples     []Sample  `json:"samples"`
+	CollectedAt         time.Time `json:"collected_at"`
+	NodeID              string    `json:"node_id"`
+	Env                 string    `json:"env"`
+	SnapshotRef         string    `json:"snapshot_ref,omitempty"`
+	BatchRef            string    `json:"batch_ref,omitempty"`
+	TraceParent         string    `json:"traceparent,omitempty"`
+	ProducerTraceParent string    `json:"producer_traceparent,omitempty"`
+	Samples             []Sample  `json:"samples"`
 }
 
 type SnapshotWindowPage struct {

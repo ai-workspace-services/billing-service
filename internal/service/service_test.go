@@ -2,12 +2,19 @@ package service
 
 import (
 	"context"
+	"runtime"
+	"strings"
 	"testing"
 	"time"
 
 	"billing-service/internal/config"
 	"billing-service/internal/model"
+	"billing-service/internal/observability"
 	"billing-service/internal/repository"
+
+	"go.opentelemetry.io/otel"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
 
 type fakeWindowSource struct {
@@ -820,3 +827,372 @@ func TestMultiInboundDuplicateWindowIsReplaySafe(t *testing.T) {
 		t.Fatalf("expected exactly 1 ledger entry despite replay, got %d", len(repo.ledgers))
 	}
 }
+
+func spanAttrMap(span sdktrace.ReadOnlySpan) map[string]string {
+	m := make(map[string]string, len(span.Attributes()))
+	for _, a := range span.Attributes() {
+		m[string(a.Key)] = a.Value.Emit()
+	}
+	return m
+}
+
+func findSpanByName(spans []sdktrace.ReadOnlySpan, name string) (sdktrace.ReadOnlySpan, bool) {
+	for _, s := range spans {
+		if s.Name() == name {
+			return s, true
+		}
+	}
+	return nil, false
+}
+
+func assertNoSensitiveLeakInSpans(t *testing.T, spans []sdktrace.ReadOnlySpan, forbidden ...string) {
+	t.Helper()
+	for _, span := range spans {
+		for _, secret := range forbidden {
+			if secret == "" {
+				continue
+			}
+			if strings.Contains(span.Name(), secret) {
+				t.Fatalf("span name %q leaked %q", span.Name(), secret)
+			}
+			if strings.Contains(span.Status().Description, secret) {
+				t.Fatalf("span %q status description leaked %q: %q", span.Name(), secret, span.Status().Description)
+			}
+			for _, attr := range span.Attributes() {
+				if strings.Contains(attr.Value.Emit(), secret) {
+					t.Fatalf("span %q attribute %s leaked %q: %q", span.Name(), attr.Key, secret, attr.Value.Emit())
+				}
+			}
+			for _, ev := range span.Events() {
+				if strings.Contains(ev.Name, secret) {
+					t.Fatalf("span %q event name leaked %q", span.Name(), secret)
+				}
+				for _, attr := range ev.Attributes {
+					if strings.Contains(attr.Value.Emit(), secret) {
+						t.Fatalf("span %q event attribute %s leaked %q", span.Name(), attr.Key, secret)
+					}
+				}
+			}
+		}
+	}
+}
+
+func TestIngestSnapshotPipelineSpansAndPrivacyAcrossLifecycles(t *testing.T) {
+	recorder := tracetest.NewSpanRecorder()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	prevTP := otel.GetTracerProvider()
+	otel.SetTracerProvider(tp)
+	defer func() {
+		otel.SetTracerProvider(prevTP)
+		_ = tp.Shutdown(context.Background())
+	}()
+
+	repo := newMemoryRepo()
+	cfg := baseConfig()
+	cfg.ExporterSources = nil
+	cfg.PullEnabled = false
+	svc := New(cfg, &fakeWindowSource{}, repo)
+
+	accountUUID := "11111111-1111-1111-1111-111111111111"
+	userEmail := "sensitive-user@example.com"
+	producerTraceParent := "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+
+	// 1. Baseline snapshot with ProducerTraceParent and explicit SnapshotRef/BatchRef
+	_, err := svc.IngestSnapshot(context.Background(), model.Snapshot{
+		CollectedAt:         time.Date(2026, 10, 21, 10, 0, 15, 0, time.UTC),
+		NodeID:              "jp-tyo-01-xhttp",
+		Env:                 "prod",
+		SnapshotRef:         "snap-001",
+		BatchRef:            "batch-001",
+		ProducerTraceParent: producerTraceParent,
+		Samples: []model.Sample{
+			{UUID: accountUUID, Email: userEmail, InboundTag: "xhttp", UplinkBytesTotal: 100, DownlinkBytesTotal: 50},
+			{UUID: "invalid-uuid", Email: userEmail, InboundTag: "xhttp", UplinkBytesTotal: 10, DownlinkBytesTotal: 10},
+		},
+	})
+	if err != nil {
+		t.Fatalf("baseline ingest: %v", err)
+	}
+
+	spans := recorder.Ended()
+	assertNoSensitiveLeakInSpans(t, spans, accountUUID, userEmail, "invalid-uuid", cfg.InternalServiceToken)
+
+	validateSpan, ok := findSpanByName(spans, "billing.ingest.validate")
+	if !ok {
+		t.Fatalf("missing billing.ingest.validate span")
+	}
+	if len(validateSpan.Links()) != 1 || validateSpan.Links()[0].SpanContext.TraceID().String() != "4bf92f3577b34da6a3ce929d0e0e4736" {
+		t.Fatalf("expected producer SpanLink on validate span, got %#v", validateSpan.Links())
+	}
+	valAttrs := spanAttrMap(validateSpan)
+	if valAttrs["transport"] != "xhttp" || valAttrs["snapshot_ref"] != "snap-001" || valAttrs["batch_ref"] != "batch-001" || valAttrs["outcome"] != "ok" {
+		t.Fatalf("unexpected validate attributes: %#v", valAttrs)
+	}
+
+	dedupSpan, ok := findSpanByName(spans, "billing.ingest.deduplicate")
+	if !ok {
+		t.Fatalf("missing billing.ingest.deduplicate span")
+	}
+	dedupAttrs := spanAttrMap(dedupSpan)
+	if dedupAttrs["outcome"] != "partial_invalid" || dedupAttrs["raw_samples"] != "2" || dedupAttrs["aggregated_accounts"] != "1" {
+		t.Fatalf("unexpected deduplicate attributes: %#v", dedupAttrs)
+	}
+
+	deltaSpan, ok := findSpanByName(spans, "billing.ingest.delta")
+	if !ok || spanAttrMap(deltaSpan)["outcome"] != "baseline" || spanAttrMap(deltaSpan)["delta_bytes"] != "150" {
+		t.Fatalf("expected baseline delta span with delta_bytes=150, got %#v", spanAttrMap(deltaSpan))
+	}
+	bucketSpan, ok := findSpanByName(spans, "billing.ingest.bucket.write")
+	if !ok || spanAttrMap(bucketSpan)["outcome"] != "written" {
+		t.Fatalf("expected written bucket span, got %#v", spanAttrMap(bucketSpan))
+	}
+	ledgerSpan, ok := findSpanByName(spans, "billing.ingest.ledger.write")
+	if !ok || spanAttrMap(ledgerSpan)["outcome"] != "written" {
+		t.Fatalf("expected written ledger span, got %#v", spanAttrMap(ledgerSpan))
+	}
+	quotaSpan, ok := findSpanByName(spans, "billing.ingest.quota.write")
+	if !ok || spanAttrMap(quotaSpan)["outcome"] != "written" {
+		t.Fatalf("expected written quota span, got %#v", spanAttrMap(quotaSpan))
+	}
+	cpSpan, ok := findSpanByName(spans, "billing.ingest.checkpoint.write")
+	if !ok || spanAttrMap(cpSpan)["outcome"] != "written" {
+		t.Fatalf("expected written checkpoint span, got %#v", spanAttrMap(cpSpan))
+	}
+
+	// 2. Replay of the same minute (zero delta + replayed bucket/ledger + skipped_replay quota)
+	recorder.Reset()
+	_, err = svc.IngestSnapshot(context.Background(), model.Snapshot{
+		CollectedAt: time.Date(2026, 10, 21, 10, 0, 45, 0, time.UTC),
+		NodeID:      "jp-tyo-01-xhttp",
+		Env:         "prod",
+		Samples: []model.Sample{
+			{UUID: accountUUID, Email: userEmail, InboundTag: "xhttp", UplinkBytesTotal: 100, DownlinkBytesTotal: 50},
+		},
+	})
+	if err != nil {
+		t.Fatalf("replay ingest: %v", err)
+	}
+	spans = recorder.Ended()
+	assertNoSensitiveLeakInSpans(t, spans, accountUUID, userEmail)
+	if deltaSpan, ok := findSpanByName(spans, "billing.ingest.delta"); !ok || spanAttrMap(deltaSpan)["outcome"] != "zero_delta" {
+		t.Fatalf("expected zero_delta outcome on replay, got %#v", spanAttrMap(deltaSpan))
+	}
+	if bucketSpan, ok := findSpanByName(spans, "billing.ingest.bucket.write"); !ok || spanAttrMap(bucketSpan)["outcome"] != "replayed" {
+		t.Fatalf("expected replayed bucket outcome, got %#v", spanAttrMap(bucketSpan))
+	}
+	if ledgerSpan, ok := findSpanByName(spans, "billing.ingest.ledger.write"); !ok || spanAttrMap(ledgerSpan)["outcome"] != "replayed" {
+		t.Fatalf("expected replayed ledger outcome, got %#v", spanAttrMap(ledgerSpan))
+	}
+	if quotaSpan, ok := findSpanByName(spans, "billing.ingest.quota.write"); !ok || spanAttrMap(quotaSpan)["outcome"] != "skipped_replay" {
+		t.Fatalf("expected skipped_replay quota outcome, got %#v", spanAttrMap(quotaSpan))
+	}
+
+	// 3. Positive delta in next minute
+	recorder.Reset()
+	_, err = svc.IngestSnapshot(context.Background(), model.Snapshot{
+		CollectedAt: time.Date(2026, 10, 21, 10, 1, 15, 0, time.UTC),
+		NodeID:      "jp-tyo-01-xhttp",
+		Env:         "prod",
+		Samples: []model.Sample{
+			{UUID: accountUUID, Email: userEmail, InboundTag: "xhttp", UplinkBytesTotal: 140, DownlinkBytesTotal: 60},
+		},
+	})
+	if err != nil {
+		t.Fatalf("positive delta ingest: %v", err)
+	}
+	spans = recorder.Ended()
+	if deltaSpan, ok := findSpanByName(spans, "billing.ingest.delta"); !ok || spanAttrMap(deltaSpan)["outcome"] != "positive_delta" || spanAttrMap(deltaSpan)["delta_bytes"] != "50" {
+		t.Fatalf("expected positive_delta with delta_bytes=50, got %#v", spanAttrMap(deltaSpan))
+	}
+
+	// 4. Counter reset in next minute
+	recorder.Reset()
+	_, err = svc.IngestSnapshot(context.Background(), model.Snapshot{
+		CollectedAt: time.Date(2026, 10, 21, 10, 2, 15, 0, time.UTC),
+		NodeID:      "jp-tyo-01-xhttp",
+		Env:         "prod",
+		Samples: []model.Sample{
+			{UUID: accountUUID, Email: userEmail, InboundTag: "xhttp", UplinkBytesTotal: 10, DownlinkBytesTotal: 5},
+		},
+	})
+	if err != nil {
+		t.Fatalf("counter reset ingest: %v", err)
+	}
+	spans = recorder.Ended()
+	if deltaSpan, ok := findSpanByName(spans, "billing.ingest.delta"); !ok || spanAttrMap(deltaSpan)["outcome"] != "counter_reset" {
+		t.Fatalf("expected counter_reset outcome, got %#v", spanAttrMap(deltaSpan))
+	}
+	if cpSpan, ok := findSpanByName(spans, "billing.ingest.checkpoint.write"); !ok || spanAttrMap(cpSpan)["outcome"] != "reset_written" {
+		t.Fatalf("expected reset_written checkpoint outcome, got %#v", spanAttrMap(cpSpan))
+	}
+
+	// 5. Empty samples snapshot & validation error snapshot
+	recorder.Reset()
+	_, err = svc.IngestSnapshot(context.Background(), model.Snapshot{
+		CollectedAt: time.Date(2026, 10, 21, 10, 3, 0, 0, time.UTC),
+		NodeID:      "jp-tyo-01-tcp",
+		Env:         "prod",
+		Samples:     nil,
+	})
+	if err != nil {
+		t.Fatalf("empty samples ingest: %v", err)
+	}
+	spans = recorder.Ended()
+	if validateSpan, ok := findSpanByName(spans, "billing.ingest.validate"); !ok || spanAttrMap(validateSpan)["outcome"] != "empty_samples" || spanAttrMap(validateSpan)["transport"] != "tcp" {
+		t.Fatalf("expected empty_samples outcome on tcp node, got %#v", spanAttrMap(validateSpan))
+	}
+
+	recorder.Reset()
+	_, err = svc.IngestSnapshot(context.Background(), model.Snapshot{
+		CollectedAt: time.Date(2026, 10, 21, 10, 3, 0, 0, time.UTC),
+		NodeID:      "",
+		Env:         "prod",
+	})
+	if err == nil {
+		t.Fatalf("expected validation error for missing node_id")
+	}
+	spans = recorder.Ended()
+	if validateSpan, ok := findSpanByName(spans, "billing.ingest.validate"); !ok || spanAttrMap(validateSpan)["outcome"] != "error" || spanAttrMap(validateSpan)["error_class"] != "missing_node_id" {
+		t.Fatalf("expected validation error span, got %#v", spanAttrMap(validateSpan))
+	}
+}
+
+func TestUnreachableOTLPCollectorDoesNotBlockOrFailIngestSnapshot(t *testing.T) {
+	t.Setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "http://127.0.0.1:1")
+	t.Setenv("OTEL_TRACES_SAMPLER_ARG", "1.0")
+
+	prevTP := otel.GetTracerProvider()
+	shutdown, err := observability.Configure(context.Background(), "web-saas-billing")
+	if err != nil {
+		t.Fatalf("Configure: %v", err)
+	}
+	defer func() {
+		otel.SetTracerProvider(prevTP)
+		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+		defer cancel()
+		_ = shutdown(ctx)
+	}()
+
+	repo := newMemoryRepo()
+	cfg := baseConfig()
+	cfg.ExporterSources = nil
+	cfg.PullEnabled = false
+	svc := New(cfg, &fakeWindowSource{}, repo)
+
+	start := time.Now()
+	result, err := svc.IngestSnapshot(context.Background(), model.Snapshot{
+		CollectedAt: time.Date(2026, 10, 21, 10, 5, 0, 0, time.UTC),
+		NodeID:      "jp-tyo-01-xhttp",
+		Env:         "prod",
+		Samples: []model.Sample{{
+			UUID:               "11111111-1111-1111-1111-111111111111",
+			Email:              "user@example.com",
+			UplinkBytesTotal:   100,
+			DownlinkBytesTotal: 50,
+		}},
+	})
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("expected IngestSnapshot to succeed when collector is unreachable, got %v", err)
+	}
+	if result.ProcessedSamples != 1 || result.WrittenMinutes != 1 {
+		t.Fatalf("unexpected result %#v", result)
+	}
+	if elapsed > 500*time.Millisecond {
+		t.Fatalf("expected non-blocking async span batching, took %v", elapsed)
+	}
+}
+
+func TestOTelBeforeAfterLoadParityAndBoundedQueueUnderCollectorOutage(t *testing.T) {
+	runWorkload := func(t *testing.T, enableOTel bool) (*memoryRepo, time.Duration, uint64) {
+		t.Helper()
+		prevTP := otel.GetTracerProvider()
+		var shutdown func(context.Context) error
+		if enableOTel {
+			t.Setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "http://127.0.0.1:1")
+			t.Setenv("OTEL_TRACES_SAMPLER_ARG", "1.0")
+			var err error
+			shutdown, err = observability.Configure(context.Background(), "web-saas-billing")
+			if err != nil {
+				t.Fatalf("Configure: %v", err)
+			}
+		} else {
+			t.Setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "")
+			t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "")
+			var err error
+			shutdown, err = observability.Configure(context.Background(), "web-saas-billing")
+			if err != nil {
+				t.Fatalf("Configure disabled: %v", err)
+			}
+		}
+		defer func() {
+			otel.SetTracerProvider(prevTP)
+			if shutdown != nil {
+				ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+				defer cancel()
+				_ = shutdown(ctx)
+			}
+		}()
+
+		repo := newMemoryRepo()
+		cfg := baseConfig()
+		cfg.ExporterSources = nil
+		cfg.PullEnabled = false
+		svc := New(cfg, &fakeWindowSource{}, repo)
+
+		var memBefore, memAfter runtime.MemStats
+		runtime.GC()
+		runtime.ReadMemStats(&memBefore)
+
+		const rounds = 350 // >2450 spans, exceeding MaxQueueSize=2048 when collector is unreachable
+		baseTime := time.Date(2026, 10, 21, 0, 0, 0, 0, time.UTC)
+		start := time.Now()
+		for i := 0; i < rounds; i++ {
+			res, err := svc.IngestSnapshot(context.Background(), model.Snapshot{
+				CollectedAt: baseTime.Add(time.Duration(i) * time.Minute),
+				NodeID:      "jp-tyo-01-xhttp",
+				Env:         "prod",
+				Samples: []model.Sample{{
+					UUID:               "11111111-1111-1111-1111-111111111111",
+					Email:              "user@example.com",
+					UplinkBytesTotal:   int64((i + 1) * 100),
+					DownlinkBytesTotal: int64((i + 1) * 50),
+				}},
+			})
+			if err != nil {
+				t.Fatalf("round %d error: %v", i, err)
+			}
+			if res.ProcessedSamples != 1 || res.WrittenMinutes != 1 {
+				t.Fatalf("round %d unexpected result: %#v", i, res)
+			}
+		}
+		elapsed := time.Since(start)
+		runtime.GC()
+		runtime.ReadMemStats(&memAfter)
+		var heapDelta uint64
+		if memAfter.HeapAlloc > memBefore.HeapAlloc {
+			heapDelta = memAfter.HeapAlloc - memBefore.HeapAlloc
+		}
+		return repo, elapsed, heapDelta
+	}
+
+	repoDisabled, elapsedDisabled, _ := runWorkload(t, false)
+	repoEnabled, elapsedEnabled, heapDelta := runWorkload(t, true)
+
+	if len(repoDisabled.buckets) != len(repoEnabled.buckets) || len(repoDisabled.ledgers) != len(repoEnabled.ledgers) {
+		t.Fatalf("business output count mismatch: disabled=(%d,%d) enabled=(%d,%d)",
+			len(repoDisabled.buckets), len(repoDisabled.ledgers), len(repoEnabled.buckets), len(repoEnabled.ledgers))
+	}
+	qDisabled := repoDisabled.quotas["11111111-1111-1111-1111-111111111111"]
+	qEnabled := repoEnabled.quotas["11111111-1111-1111-1111-111111111111"]
+	if qDisabled.CurrentBalance != qEnabled.CurrentBalance || qDisabled.RemainingIncludedQuota != qEnabled.RemainingIncludedQuota {
+		t.Fatalf("quota parity mismatch: disabled=%#v enabled=%#v", qDisabled, qEnabled)
+	}
+	if heapDelta > 32*1024*1024 {
+		t.Fatalf("heap delta exceeded 32MiB budget under unreachable collector: %d bytes", heapDelta)
+	}
+	t.Logf("OTel load parity: rounds=350 disabled=%v enabled_unreachable_collector=%v heap_delta_bytes=%d balance=%v",
+		elapsedDisabled, elapsedEnabled, heapDelta, qEnabled.CurrentBalance)
+}
+
+

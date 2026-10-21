@@ -64,6 +64,7 @@ CREATE TABLE IF NOT EXISTS public.account_quota_states (
   remaining_included_quota BIGINT NOT NULL DEFAULT 0,
   current_balance DOUBLE PRECISION NOT NULL DEFAULT 0,
   arrears BOOLEAN NOT NULL DEFAULT false,
+  arrears_since TIMESTAMPTZ NULL,
   throttle_state TEXT NOT NULL DEFAULT 'normal',
   suspend_state TEXT NOT NULL DEFAULT 'active',
   last_rated_bucket_at TIMESTAMPTZ NULL,
