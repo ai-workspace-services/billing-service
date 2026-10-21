@@ -110,6 +110,65 @@ func TestPostgresAcceptanceWritesAccountingTables(t *testing.T) {
 	if totalBytes != 150 {
 		t.Fatalf("expected total_bytes 150, got %d", totalBytes)
 	}
+
+	// Verify exact duplicate snapshot replay against real PostgreSQL does not zero out bucket/ledger or double charge.
+	replayResult, err := svc.IngestSnapshot(ctx, model.Snapshot{
+		CollectedAt: time.Date(2026, 4, 8, 11, 0, 45, 0, time.UTC),
+		NodeID:      "jp-node",
+		Env:         "prod",
+		Samples: []model.Sample{{
+			UUID:               accountUUID,
+			Email:              "billing@example.com",
+			InboundTag:         "premium",
+			UplinkBytesTotal:   100,
+			DownlinkBytesTotal: 50,
+		}},
+	})
+	if err != nil {
+		t.Fatalf("replay ingest snapshot: %v", err)
+	}
+	if replayResult.ReplayedMinutes != 1 {
+		t.Fatalf("expected 1 replayed minute on duplicate delivery, got %#v", replayResult)
+	}
+	if err := db.QueryRowContext(ctx, `SELECT total_bytes FROM traffic_minute_buckets LIMIT 1`).Scan(&totalBytes); err != nil {
+		t.Fatalf("query total_bytes after replay: %v", err)
+	}
+	if totalBytes != 150 {
+		t.Fatalf("expected total_bytes 150 preserved after duplicate replay, got %d", totalBytes)
+	}
+
+	// Verify same-minute increasing snapshot accumulates into the existing minute bucket and deducts only the incremental delta.
+	sameMinuteResult, err := svc.IngestSnapshot(ctx, model.Snapshot{
+		CollectedAt: time.Date(2026, 4, 8, 11, 0, 58, 0, time.UTC),
+		NodeID:      "jp-node",
+		Env:         "prod",
+		Samples: []model.Sample{{
+			UUID:               accountUUID,
+			Email:              "billing@example.com",
+			InboundTag:         "premium",
+			UplinkBytesTotal:   220,
+			DownlinkBytesTotal: 130,
+		}},
+	})
+	if err != nil {
+		t.Fatalf("same-minute ingest snapshot: %v", err)
+	}
+	if sameMinuteResult.WrittenMinutes != 1 {
+		t.Fatalf("expected 1 written minute on same-minute increment, got %#v", sameMinuteResult)
+	}
+	if err := db.QueryRowContext(ctx, `SELECT total_bytes FROM traffic_minute_buckets LIMIT 1`).Scan(&totalBytes); err != nil {
+		t.Fatalf("query total_bytes after same-minute increment: %v", err)
+	}
+	if totalBytes != 350 {
+		t.Fatalf("expected accumulated total_bytes 350, got %d", totalBytes)
+	}
+	var remainingQuota int64
+	if err := db.QueryRowContext(ctx, `SELECT remaining_included_quota FROM account_quota_states WHERE account_uuid = $1`, accountUUID).Scan(&remainingQuota); err != nil {
+		t.Fatalf("query remaining_included_quota: %v", err)
+	}
+	if remainingQuota != 650 {
+		t.Fatalf("expected remaining_included_quota 650, got %d", remainingQuota)
+	}
 }
 
 func assertRowCount(t *testing.T, db *sql.DB, table string, want int) {
