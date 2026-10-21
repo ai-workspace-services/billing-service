@@ -11,7 +11,14 @@ import (
 	"time"
 
 	"billing-service/internal/model"
+	"billing-service/internal/observability"
 	"billing-service/internal/service"
+
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace"
 )
 
 type Handler struct {
@@ -53,19 +60,51 @@ func (h *Handler) ingestSnapshot(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
+
+	reqCtx := r.Context()
+	if !trace.SpanContextFromContext(reqCtx).IsValid() {
+		reqCtx = propagation.TraceContext{}.Extract(reqCtx, propagation.HeaderCarrier(r.Header))
+	}
+
+	_, decodeSpan := otel.Tracer("billing-service").Start(reqCtx, "billing.ingest.decode",
+		trace.WithAttributes(attribute.String("stage", "decode")),
+	)
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxIngestBodyBytes))
+	decodeSpan.SetAttributes(attribute.Int("payload_bytes", len(body)))
 	if err != nil {
+		decodeSpan.SetAttributes(
+			attribute.String("outcome", "error"),
+			attribute.String("error_class", "body_read_error"),
+		)
+		decodeSpan.SetStatus(codes.Error, "read_snapshot_body_failed")
+		decodeSpan.End()
 		http.Error(w, "invalid snapshot: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 	snapshots, err := decodeSnapshots(body)
 	if err != nil {
+		decodeSpan.SetAttributes(
+			attribute.String("outcome", "error"),
+			attribute.String("error_class", "invalid_json"),
+		)
+		decodeSpan.SetStatus(codes.Error, "invalid_snapshot_json")
+		decodeSpan.End()
 		// Echo a bounded prefix of what actually arrived. Without it a shape
 		// mismatch upstream only ever surfaces as an opaque 400 on the sender
 		// side, with no way to tell which encoding produced it.
 		http.Error(w, "invalid snapshot: "+err.Error()+"; body prefix: "+bodyPrefix(body), http.StatusBadRequest)
 		return
 	}
+	for _, snapshot := range snapshots {
+		if producerSpanCtx, ok := observability.ExtractTraceParent(snapshot.ProducerTraceParent, snapshot.TraceParent); ok {
+			decodeSpan.AddLink(trace.Link{SpanContext: producerSpanCtx})
+		}
+	}
+	decodeSpan.SetAttributes(
+		attribute.String("outcome", "ok"),
+		attribute.Int("snapshot_count", len(snapshots)),
+	)
+	decodeSpan.End()
 
 	// Report the worst outcome across the batch: one bad snapshot must not be
 	// hidden by later good ones, and a partial success must not read as a
@@ -75,7 +114,7 @@ func (h *Handler) ingestSnapshot(w http.ResponseWriter, r *http.Request) {
 		firstErr   error
 	)
 	for _, snapshot := range snapshots {
-		result, err := h.service.IngestSnapshot(r.Context(), snapshot)
+		result, err := h.service.IngestSnapshot(reqCtx, snapshot)
 		lastResult = result
 		if err != nil && firstErr == nil {
 			firstErr = err

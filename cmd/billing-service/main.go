@@ -134,7 +134,7 @@ func runBilling(ctx context.Context, cfg config.Config) error {
 func openDatabase(ctx context.Context, cfg config.Config) (*sql.DB, error) {
 	var lastErr error
 	for attempt := 1; attempt <= cfg.DatabaseStartupRetries; attempt++ {
-		db, err := otelsql.Open("pgx", cfg.DatabaseURL)
+		db, err := otelsql.Open("pgx", cfg.DatabaseURL, observability.SQLOptions()...)
 		if err == nil {
 			if cfg.DatabaseMaxOpenConns > 0 {
 				db.SetMaxOpenConns(cfg.DatabaseMaxOpenConns)

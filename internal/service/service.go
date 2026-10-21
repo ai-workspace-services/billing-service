@@ -10,10 +10,19 @@ import (
 
 	"billing-service/internal/config"
 	"billing-service/internal/model"
+	"billing-service/internal/observability"
 	"billing-service/internal/repository"
 
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
+
+func serviceTracer() trace.Tracer {
+	return otel.Tracer("billing-service")
+}
 
 const (
 	sourceWindowOverlap  = 2 * time.Minute
@@ -132,18 +141,61 @@ func (s *Service) IngestSnapshot(ctx context.Context, snapshot model.Snapshot) (
 
 	startedAt := time.Now().UTC()
 	result := model.JobResult{Job: "ingest-snapshot", StartedAt: startedAt, Status: "ok"}
+
+	transport := observability.TransportFromNodeID(snapshot.NodeID)
+	snapshotRef := strings.TrimSpace(snapshot.SnapshotRef)
+	if snapshotRef == "" {
+		snapshotRef = observability.DeterministicSnapshotRef(snapshot.Env, snapshot.NodeID, snapshot.CollectedAt)
+	}
+	attrs := []attribute.KeyValue{
+		attribute.String("stage", "validate"),
+		attribute.String("transport", transport),
+		attribute.String("env", strings.TrimSpace(snapshot.Env)),
+		attribute.String("snapshot_ref", snapshotRef),
+		attribute.Int("sample_count", len(snapshot.Samples)),
+	}
+	if batchRef := strings.TrimSpace(snapshot.BatchRef); batchRef != "" {
+		attrs = append(attrs, attribute.String("batch_ref", batchRef))
+	}
+	opts := []trace.SpanStartOption{trace.WithAttributes(attrs...)}
+	if producerSpanCtx, ok := observability.ExtractTraceParent(snapshot.ProducerTraceParent, snapshot.TraceParent); ok {
+		opts = append(opts, trace.WithLinks(trace.Link{SpanContext: producerSpanCtx}))
+	}
+	validateCtx, validateSpan := serviceTracer().Start(ctx, "billing.ingest.validate", opts...)
+	defer validateSpan.End()
+
 	switch {
 	case snapshot.CollectedAt.IsZero():
 		result.Status = "error"
 		result.Error = "snapshot collected_at is required"
+		validateSpan.SetAttributes(
+			attribute.String("outcome", "error"),
+			attribute.String("error_class", "missing_collected_at"),
+		)
+		validateSpan.SetStatus(codes.Error, result.Error)
 	case strings.TrimSpace(snapshot.NodeID) == "":
 		result.Status = "error"
 		result.Error = "snapshot node_id is required"
+		validateSpan.SetAttributes(
+			attribute.String("outcome", "error"),
+			attribute.String("error_class", "missing_node_id"),
+		)
+		validateSpan.SetStatus(codes.Error, result.Error)
 	case strings.TrimSpace(snapshot.Env) == "":
 		result.Status = "error"
 		result.Error = "snapshot env is required"
+		validateSpan.SetAttributes(
+			attribute.String("outcome", "error"),
+			attribute.String("error_class", "missing_env"),
+		)
+		validateSpan.SetStatus(codes.Error, result.Error)
 	default:
-		if _, err := s.processSnapshot(ctx, snapshot, &result); err != nil {
+		if len(snapshot.Samples) == 0 {
+			validateSpan.SetAttributes(attribute.String("outcome", "empty_samples"))
+		} else {
+			validateSpan.SetAttributes(attribute.String("outcome", "ok"))
+		}
+		if _, err := s.processSnapshot(validateCtx, snapshot, &result); err != nil {
 			result.Status = "error"
 			result.Error = err.Error()
 		}
@@ -261,8 +313,27 @@ func (s *Service) collectSource(ctx context.Context, source config.ExporterSourc
 }
 
 func (s *Service) processSnapshot(ctx context.Context, snapshot model.Snapshot, result *model.JobResult) (bool, error) {
+	transport := observability.TransportFromNodeID(snapshot.NodeID)
+	_, dedupSpan := serviceTracer().Start(ctx, "billing.ingest.deduplicate",
+		trace.WithAttributes(
+			attribute.String("stage", "deduplicate"),
+			attribute.String("transport", transport),
+			attribute.Int("raw_samples", len(snapshot.Samples)),
+		),
+	)
+	aggregated, hadInvalid := aggregateSamplesByUUIDWithStats(snapshot.Samples, result)
+	dedupOutcome := "ok"
+	if hadInvalid {
+		dedupOutcome = "partial_invalid"
+	}
+	dedupSpan.SetAttributes(
+		attribute.Int("aggregated_accounts", len(aggregated)),
+		attribute.String("outcome", dedupOutcome),
+	)
+	dedupSpan.End()
+
 	processedAny := false
-	for _, sample := range aggregateSamplesByUUID(snapshot.Samples, result) {
+	for _, sample := range aggregated {
 		processed, err := s.processSample(ctx, snapshot, sample, result)
 		if err != nil {
 			return processedAny, fmt.Errorf("process snapshot %s for %s: %w", snapshot.CollectedAt.UTC().Format(time.RFC3339), sample.UUID, err)
@@ -292,10 +363,17 @@ func (s *Service) processSnapshot(ctx context.Context, snapshot model.Snapshot, 
 // point the checkpoint key must gain a line dimension instead of removing
 // this aggregation step.
 func aggregateSamplesByUUID(samples []model.Sample, result *model.JobResult) []model.Sample {
+	out, _ := aggregateSamplesByUUIDWithStats(samples, result)
+	return out
+}
+
+func aggregateSamplesByUUIDWithStats(samples []model.Sample, result *model.JobResult) ([]model.Sample, bool) {
 	aggregated := make(map[string]model.Sample, len(samples))
 	order := make([]string, 0, len(samples))
+	hadInvalid := false
 	for _, sample := range samples {
 		if err := validateSample(sample); err != nil {
+			hadInvalid = true
 			result.Status = "partial"
 			result.Error = joinError(result.Error, err.Error())
 			continue
@@ -318,15 +396,28 @@ func aggregateSamplesByUUID(samples []model.Sample, result *model.JobResult) []m
 	for _, uuid := range order {
 		out = append(out, aggregated[uuid])
 	}
-	return out
+	return out, hadInvalid
 }
 
 func (s *Service) processSample(ctx context.Context, snapshot model.Snapshot, sample model.Sample, result *model.JobResult) (bool, error) {
 	storageNodeID := composeStorageNodeID(snapshot.Env, snapshot.NodeID)
 	minuteStart := snapshot.CollectedAt.UTC().Truncate(time.Minute)
+	transport := observability.TransportFromNodeID(snapshot.NodeID)
 
-	checkpoint, err := s.repo.GetCheckpoint(ctx, storageNodeID, sample.UUID)
+	deltaCtx, deltaSpan := serviceTracer().Start(ctx, "billing.ingest.delta",
+		trace.WithAttributes(
+			attribute.String("stage", "delta"),
+			attribute.String("transport", transport),
+		),
+	)
+	checkpoint, err := s.repo.GetCheckpoint(deltaCtx, storageNodeID, sample.UUID)
 	if err != nil {
+		deltaSpan.SetAttributes(
+			attribute.String("outcome", "error"),
+			attribute.String("error_class", "checkpoint_read_error"),
+		)
+		deltaSpan.SetStatus(codes.Error, "get_checkpoint_failed")
+		deltaSpan.End()
 		return false, fmt.Errorf("get checkpoint %s: %w", sample.UUID, err)
 	}
 
@@ -340,8 +431,20 @@ func (s *Service) processSample(ctx context.Context, snapshot model.Snapshot, sa
 	}
 
 	if deltaUplink < 0 || deltaDownlink < 0 {
+		deltaSpan.SetAttributes(
+			attribute.String("outcome", "counter_reset"),
+			attribute.Int64("delta_bytes", 0),
+		)
+		deltaSpan.End()
+
 		resetEpoch++
-		err := s.repo.UpsertCheckpoint(ctx, model.Checkpoint{
+		cpCtx, cpSpan := serviceTracer().Start(ctx, "billing.ingest.checkpoint.write",
+			trace.WithAttributes(
+				attribute.String("stage", "checkpoint_write"),
+				attribute.String("transport", transport),
+			),
+		)
+		err := s.repo.UpsertCheckpoint(cpCtx, model.Checkpoint{
 			NodeID:            storageNodeID,
 			AccountUUID:       sample.UUID,
 			LastUplinkTotal:   sample.UplinkBytesTotal,
@@ -351,12 +454,33 @@ func (s *Service) processSample(ctx context.Context, snapshot model.Snapshot, sa
 			ResetEpoch:        resetEpoch,
 		})
 		if err != nil {
+			cpSpan.SetAttributes(
+				attribute.String("outcome", "error"),
+				attribute.String("error_class", "checkpoint_write_error"),
+			)
+			cpSpan.SetStatus(codes.Error, "upsert_reset_checkpoint_failed")
+			cpSpan.End()
 			return false, fmt.Errorf("upsert reset checkpoint %s: %w", sample.UUID, err)
 		}
+		cpSpan.SetAttributes(attribute.String("outcome", "reset_written"))
+		cpSpan.End()
 		return false, nil
 	}
 
 	totalBytes := deltaUplink + deltaDownlink
+	deltaOutcome := "positive_delta"
+	switch {
+	case checkpoint == nil:
+		deltaOutcome = "baseline"
+	case totalBytes == 0:
+		deltaOutcome = "zero_delta"
+	}
+	deltaSpan.SetAttributes(
+		attribute.String("outcome", deltaOutcome),
+		attribute.Int64("delta_bytes", totalBytes),
+	)
+	deltaSpan.End()
+
 	profile, err := s.repo.GetBillingProfile(ctx, sample.UUID)
 	if err != nil {
 		return false, fmt.Errorf("get billing profile %s: %w", sample.UUID, err)
@@ -377,15 +501,30 @@ func (s *Service) processSample(ctx context.Context, snapshot model.Snapshot, sa
 		SourceRevision: effectivePricing.pricingRuleVersion,
 	}
 
-	minuteExisted, err := s.repo.UpsertMinuteBucket(ctx, bucket)
+	bucketCtx, bucketSpan := serviceTracer().Start(ctx, "billing.ingest.bucket.write",
+		trace.WithAttributes(
+			attribute.String("stage", "bucket_write"),
+			attribute.String("transport", transport),
+		),
+	)
+	minuteExisted, err := s.repo.UpsertMinuteBucket(bucketCtx, bucket)
 	if err != nil {
+		bucketSpan.SetAttributes(
+			attribute.String("outcome", "error"),
+			attribute.String("error_class", "bucket_write_error"),
+		)
+		bucketSpan.SetStatus(codes.Error, "upsert_minute_bucket_failed")
+		bucketSpan.End()
 		return false, fmt.Errorf("upsert minute bucket %s: %w", sample.UUID, err)
 	}
 	if minuteExisted {
 		result.ReplayedMinutes++
+		bucketSpan.SetAttributes(attribute.String("outcome", "replayed"))
 	} else {
 		result.WrittenMinutes++
+		bucketSpan.SetAttributes(attribute.String("outcome", "written"))
 	}
+	bucketSpan.End()
 
 	entry := model.LedgerEntry{
 		ID:                 deterministicLedgerID(bucket),
@@ -419,11 +558,35 @@ func (s *Service) processSample(ctx context.Context, snapshot model.Snapshot, sa
 	entry.PricingRuleVersion = effectivePricing.pricingRuleVersion
 	entry.BalanceAfter = quota.CurrentBalance + amountDelta
 
-	ledgerExisted, err := s.repo.UpsertLedger(ctx, entry)
+	ledgerCtx, ledgerSpan := serviceTracer().Start(ctx, "billing.ingest.ledger.write",
+		trace.WithAttributes(
+			attribute.String("stage", "ledger_write"),
+			attribute.String("transport", transport),
+		),
+	)
+	ledgerExisted, err := s.repo.UpsertLedger(ledgerCtx, entry)
 	if err != nil {
+		ledgerSpan.SetAttributes(
+			attribute.String("outcome", "error"),
+			attribute.String("error_class", "ledger_write_error"),
+		)
+		ledgerSpan.SetStatus(codes.Error, "upsert_ledger_failed")
+		ledgerSpan.End()
 		return false, fmt.Errorf("upsert ledger %s: %w", sample.UUID, err)
 	}
+	if ledgerExisted {
+		ledgerSpan.SetAttributes(attribute.String("outcome", "replayed"))
+	} else {
+		ledgerSpan.SetAttributes(attribute.String("outcome", "written"))
+	}
+	ledgerSpan.End()
 
+	quotaCtx, quotaSpan := serviceTracer().Start(ctx, "billing.ingest.quota.write",
+		trace.WithAttributes(
+			attribute.String("stage", "quota_write"),
+			attribute.String("transport", transport),
+		),
+	)
 	if !ledgerExisted {
 		remainingQuota := quota.RemainingIncludedQuota - includedApplied
 		if remainingQuota < 0 {
@@ -445,14 +608,29 @@ func (s *Service) processSample(ctx context.Context, snapshot model.Snapshot, sa
 		quota.EffectiveAt = snapshot.CollectedAt.UTC()
 		lastRated := minuteStart
 		quota.LastRatedBucketAt = &lastRated
-		if err := s.repo.UpsertQuotaState(ctx, *quota); err != nil {
+		if err := s.repo.UpsertQuotaState(quotaCtx, *quota); err != nil {
+			quotaSpan.SetAttributes(
+				attribute.String("outcome", "error"),
+				attribute.String("error_class", "quota_write_error"),
+			)
+			quotaSpan.SetStatus(codes.Error, "upsert_quota_state_failed")
+			quotaSpan.End()
 			return false, fmt.Errorf("upsert quota state %s: %w", sample.UUID, err)
 		}
+		quotaSpan.SetAttributes(attribute.String("outcome", "written"))
 	} else {
 		result.ReplayedMinutes++
+		quotaSpan.SetAttributes(attribute.String("outcome", "skipped_replay"))
 	}
+	quotaSpan.End()
 
-	if err := s.repo.UpsertCheckpoint(ctx, model.Checkpoint{
+	cpCtx, cpSpan := serviceTracer().Start(ctx, "billing.ingest.checkpoint.write",
+		trace.WithAttributes(
+			attribute.String("stage", "checkpoint_write"),
+			attribute.String("transport", transport),
+		),
+	)
+	if err := s.repo.UpsertCheckpoint(cpCtx, model.Checkpoint{
 		NodeID:            storageNodeID,
 		AccountUUID:       sample.UUID,
 		LastUplinkTotal:   sample.UplinkBytesTotal,
@@ -461,8 +639,16 @@ func (s *Service) processSample(ctx context.Context, snapshot model.Snapshot, sa
 		XrayRevision:      s.cfg.SourceRevision,
 		ResetEpoch:        resetEpoch,
 	}); err != nil {
+		cpSpan.SetAttributes(
+			attribute.String("outcome", "error"),
+			attribute.String("error_class", "checkpoint_write_error"),
+		)
+		cpSpan.SetStatus(codes.Error, "upsert_checkpoint_failed")
+		cpSpan.End()
 		return false, fmt.Errorf("upsert checkpoint %s: %w", sample.UUID, err)
 	}
+	cpSpan.SetAttributes(attribute.String("outcome", "written"))
+	cpSpan.End()
 
 	return true, nil
 }

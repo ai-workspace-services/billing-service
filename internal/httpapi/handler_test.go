@@ -6,6 +6,11 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/codes"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
 
 type testDBPinger func(context.Context) error
@@ -194,3 +199,87 @@ func TestBodyPrefixIsBounded(t *testing.T) {
 		t.Fatalf("expected truncation marker, got %q", got[len(got)-10:])
 	}
 }
+
+func TestDecodeSnapshotsPreservesEnvelopeCorrelationFields(t *testing.T) {
+	body := `{"collected_at":"2026-08-03T10:00:00Z","node_id":"jp-tyo-01-xhttp","env":"prod",
+		"snapshot_ref":"snap-abc-123","batch_ref":"batch-xyz-789",
+		"traceparent":"00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+		"producer_traceparent":"00-11111111111111111111111111111111-2222222222222222-01",
+		"samples":[]}`
+
+	snapshots, err := decodeSnapshots([]byte(body))
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(snapshots) != 1 {
+		t.Fatalf("expected 1 snapshot, got %d", len(snapshots))
+	}
+	got := snapshots[0]
+	if got.SnapshotRef != "snap-abc-123" || got.BatchRef != "batch-xyz-789" {
+		t.Fatalf("unexpected refs: snapshot_ref=%q batch_ref=%q", got.SnapshotRef, got.BatchRef)
+	}
+	if got.TraceParent != "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01" {
+		t.Fatalf("unexpected traceparent %q", got.TraceParent)
+	}
+	if got.ProducerTraceParent != "00-11111111111111111111111111111111-2222222222222222-01" {
+		t.Fatalf("unexpected producer_traceparent %q", got.ProducerTraceParent)
+	}
+}
+
+func TestIngestSnapshotDecodeSpanNeverLeaksBodyOrPIIAndExtractsTraceParent(t *testing.T) {
+	recorder := tracetest.NewSpanRecorder()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	prevTP := otel.GetTracerProvider()
+	otel.SetTracerProvider(tp)
+	defer func() {
+		otel.SetTracerProvider(prevTP)
+		_ = tp.Shutdown(context.Background())
+	}()
+
+	handler := New(nil, "shared-secret-token").Routes()
+
+	malformedBody := `{"collected_at":"2026-08-03T10:00:00Z","uuid":"11111111-1111-1111-1111-111111111111","email":"secret@example.com",`
+	request := httptest.NewRequest(http.MethodPost, "/v1/ingest/snapshots", strings.NewReader(malformedBody))
+	request.Header.Set("Authorization", "Bearer shared-secret-token")
+	request.Header.Set("traceparent", "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", response.Code)
+	}
+
+	ended := recorder.Ended()
+	if len(ended) != 1 {
+		t.Fatalf("expected 1 decode span, got %d", len(ended))
+	}
+	span := ended[0]
+	if span.Name() != "billing.ingest.decode" {
+		t.Fatalf("expected span billing.ingest.decode, got %q", span.Name())
+	}
+	if span.SpanContext().TraceID().String() != "4bf92f3577b34da6a3ce929d0e0e4736" {
+		t.Fatalf("expected trace_id from traceparent header, got %s", span.SpanContext().TraceID().String())
+	}
+	if span.Status().Code != codes.Error {
+		t.Fatalf("expected span error status, got %v", span.Status())
+	}
+
+	forbidden := []string{
+		"11111111-1111-1111-1111-111111111111",
+		"secret@example.com",
+		"shared-secret-token",
+		"body prefix",
+		"collected_at",
+	}
+	for _, s := range forbidden {
+		if strings.Contains(span.Status().Description, s) {
+			t.Fatalf("span status description leaked %q: %q", s, span.Status().Description)
+		}
+		for _, attr := range span.Attributes() {
+			if strings.Contains(attr.Value.Emit(), s) {
+				t.Fatalf("span attribute %s leaked %q: %q", attr.Key, s, attr.Value.Emit())
+			}
+		}
+	}
+}
+
