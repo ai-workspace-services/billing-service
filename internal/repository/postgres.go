@@ -9,21 +9,63 @@ import (
 	"billing-service/internal/model"
 )
 
+type queryRunner interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
 type Postgres struct {
-	db *sql.DB
+	db   *sql.DB
+	q    queryRunner
+	inTx bool
 }
 
 func NewPostgres(db *sql.DB) *Postgres {
-	return &Postgres{db: db}
+	return &Postgres{db: db, q: db}
+}
+
+func (p *Postgres) runner() queryRunner {
+	if p.q != nil {
+		return p.q
+	}
+	return p.db
+}
+
+func (p *Postgres) forUpdateClause() string {
+	if p.inTx {
+		return " FOR UPDATE"
+	}
+	return ""
+}
+
+func (p *Postgres) WithinAccountSampleTx(ctx context.Context, fn func(Repository) error) error {
+	if p.inTx {
+		return fn(p)
+	}
+	tx, err := p.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	txRepo := &Postgres{
+		db:   p.db,
+		q:    tx,
+		inTx: true,
+	}
+	if err := fn(txRepo); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	return tx.Commit()
 }
 
 func (p *Postgres) GetCheckpoint(ctx context.Context, nodeID, accountUUID string) (*model.Checkpoint, error) {
-	const query = `
+	query := `
 		SELECT node_id, account_uuid, last_uplink_total, last_downlink_total, last_seen_at, xray_revision, reset_epoch
 		FROM traffic_stat_checkpoints
-		WHERE node_id = $1 AND account_uuid = $2`
+		WHERE node_id = $1 AND account_uuid = $2` + p.forUpdateClause()
 	var checkpoint model.Checkpoint
-	err := p.db.QueryRowContext(ctx, query, nodeID, accountUUID).Scan(
+	err := p.runner().QueryRowContext(ctx, query, nodeID, accountUUID).Scan(
 		&checkpoint.NodeID,
 		&checkpoint.AccountUUID,
 		&checkpoint.LastUplinkTotal,
@@ -53,7 +95,7 @@ func (p *Postgres) UpsertCheckpoint(ctx context.Context, checkpoint model.Checkp
 			xray_revision = EXCLUDED.xray_revision,
 			reset_epoch = EXCLUDED.reset_epoch,
 			updated_at = now()`
-	_, err := p.db.ExecContext(ctx, query,
+	_, err := p.runner().ExecContext(ctx, query,
 		checkpoint.NodeID,
 		checkpoint.AccountUUID,
 		checkpoint.LastUplinkTotal,
@@ -63,6 +105,40 @@ func (p *Postgres) UpsertCheckpoint(ctx context.Context, checkpoint model.Checkp
 		checkpoint.ResetEpoch,
 	)
 	return err
+}
+
+func (p *Postgres) GetMinuteBucket(ctx context.Context, key model.MinuteBucket) (*model.MinuteBucket, error) {
+	query := `
+		SELECT bucket_start, node_id, account_uuid, region, line_code, uplink_bytes, downlink_bytes, total_bytes, multiplier, rating_status, source_revision
+		FROM traffic_minute_buckets
+		WHERE bucket_start = $1 AND node_id = $2 AND account_uuid = $3 AND region = $4 AND line_code = $5` + p.forUpdateClause()
+	var bucket model.MinuteBucket
+	err := p.runner().QueryRowContext(ctx, query,
+		key.BucketStart.UTC(),
+		key.NodeID,
+		key.AccountUUID,
+		key.Region,
+		key.LineCode,
+	).Scan(
+		&bucket.BucketStart,
+		&bucket.NodeID,
+		&bucket.AccountUUID,
+		&bucket.Region,
+		&bucket.LineCode,
+		&bucket.UplinkBytes,
+		&bucket.DownlinkBytes,
+		&bucket.TotalBytes,
+		&bucket.Multiplier,
+		&bucket.RatingStatus,
+		&bucket.SourceRevision,
+	)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &bucket, nil
 }
 
 func (p *Postgres) UpsertMinuteBucket(ctx context.Context, bucket model.MinuteBucket) (bool, error) {
@@ -83,7 +159,7 @@ func (p *Postgres) UpsertMinuteBucket(ctx context.Context, bucket model.MinuteBu
 			rating_status = EXCLUDED.rating_status,
 			source_revision = EXCLUDED.source_revision,
 			updated_at = now()`
-	_, err = p.db.ExecContext(ctx, query,
+	_, err = p.runner().ExecContext(ctx, query,
 		bucket.BucketStart.UTC(),
 		bucket.NodeID,
 		bucket.AccountUUID,
@@ -105,7 +181,7 @@ func (p *Postgres) minuteBucketExists(ctx context.Context, bucket model.MinuteBu
 		FROM traffic_minute_buckets
 		WHERE bucket_start = $1 AND node_id = $2 AND account_uuid = $3 AND region = $4 AND line_code = $5`
 	var marker int
-	err := p.db.QueryRowContext(ctx, query,
+	err := p.runner().QueryRowContext(ctx, query,
 		bucket.BucketStart.UTC(),
 		bucket.NodeID,
 		bucket.AccountUUID,
@@ -119,6 +195,32 @@ func (p *Postgres) minuteBucketExists(ctx context.Context, bucket model.MinuteBu
 		return false, err
 	}
 	return true, nil
+}
+
+func (p *Postgres) GetLedger(ctx context.Context, id string) (*model.LedgerEntry, error) {
+	query := `
+		SELECT id, account_uuid, bucket_start, bucket_end, entry_type, rated_bytes, amount_delta, balance_after, pricing_rule_version
+		FROM billing_ledger
+		WHERE id = $1` + p.forUpdateClause()
+	var entry model.LedgerEntry
+	err := p.runner().QueryRowContext(ctx, query, id).Scan(
+		&entry.ID,
+		&entry.AccountUUID,
+		&entry.BucketStart,
+		&entry.BucketEnd,
+		&entry.EntryType,
+		&entry.RatedBytes,
+		&entry.AmountDelta,
+		&entry.BalanceAfter,
+		&entry.PricingRuleVersion,
+	)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &entry, nil
 }
 
 func (p *Postgres) UpsertLedger(ctx context.Context, entry model.LedgerEntry) (bool, error) {
@@ -136,7 +238,7 @@ func (p *Postgres) UpsertLedger(ctx context.Context, entry model.LedgerEntry) (b
 			amount_delta = EXCLUDED.amount_delta,
 			balance_after = EXCLUDED.balance_after,
 			pricing_rule_version = EXCLUDED.pricing_rule_version`
-	_, err = p.db.ExecContext(ctx, query,
+	_, err = p.runner().ExecContext(ctx, query,
 		entry.ID,
 		entry.AccountUUID,
 		entry.BucketStart.UTC(),
@@ -152,7 +254,7 @@ func (p *Postgres) UpsertLedger(ctx context.Context, entry model.LedgerEntry) (b
 
 func (p *Postgres) ledgerExists(ctx context.Context, id string) (bool, error) {
 	var marker int
-	err := p.db.QueryRowContext(ctx, `SELECT 1 FROM billing_ledger WHERE id = $1`, id).Scan(&marker)
+	err := p.runner().QueryRowContext(ctx, `SELECT 1 FROM billing_ledger WHERE id = $1`, id).Scan(&marker)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return false, nil
@@ -163,14 +265,14 @@ func (p *Postgres) ledgerExists(ctx context.Context, id string) (bool, error) {
 }
 
 func (p *Postgres) GetQuotaState(ctx context.Context, accountUUID string) (*model.QuotaState, error) {
-	const query = `
+	query := `
 		SELECT account_uuid, remaining_included_quota, current_balance, arrears, arrears_since, throttle_state, suspend_state, last_rated_bucket_at, effective_at
 		FROM account_quota_states
-		WHERE account_uuid = $1`
+		WHERE account_uuid = $1` + p.forUpdateClause()
 	var state model.QuotaState
 	var lastRated sql.NullTime
 	var arrearsSince sql.NullTime
-	err := p.db.QueryRowContext(ctx, query, accountUUID).Scan(
+	err := p.runner().QueryRowContext(ctx, query, accountUUID).Scan(
 		&state.AccountUUID,
 		&state.RemainingIncludedQuota,
 		&state.CurrentBalance,
@@ -222,7 +324,7 @@ func (p *Postgres) UpsertQuotaState(ctx context.Context, state model.QuotaState)
 	if state.ArrearsSince != nil {
 		arrearsSince = state.ArrearsSince.UTC()
 	}
-	_, err := p.db.ExecContext(ctx, query,
+	_, err := p.runner().ExecContext(ctx, query,
 		state.AccountUUID,
 		state.RemainingIncludedQuota,
 		state.CurrentBalance,
@@ -244,7 +346,7 @@ func (p *Postgres) ListArrearsAccounts(ctx context.Context) ([]model.QuotaState,
 		SELECT account_uuid, remaining_included_quota, current_balance, arrears, arrears_since, throttle_state, suspend_state, last_rated_bucket_at, effective_at
 		FROM account_quota_states
 		WHERE arrears = true AND suspend_state <> 'suspended'`
-	rows, err := p.db.QueryContext(ctx, query)
+	rows, err := p.runner().QueryContext(ctx, query)
 	if err != nil {
 		return nil, err
 	}
@@ -287,7 +389,7 @@ func (p *Postgres) GetBillingProfile(ctx context.Context, accountUUID string) (*
 		FROM account_billing_profiles
 		WHERE account_uuid = $1`
 	var profile model.BillingProfile
-	err := p.db.QueryRowContext(ctx, query, accountUUID).Scan(
+	err := p.runner().QueryRowContext(ctx, query, accountUUID).Scan(
 		&profile.AccountUUID,
 		&profile.PackageName,
 		&profile.IncludedQuotaBytes,
@@ -318,7 +420,7 @@ func (p *Postgres) GetSourceSyncState(ctx context.Context, sourceID string) (*mo
 	var lastAttempted sql.NullTime
 	var lastSucceeded sql.NullTime
 
-	err := p.db.QueryRowContext(ctx, query, sourceID).Scan(
+	err := p.runner().QueryRowContext(ctx, query, sourceID).Scan(
 		&state.SourceID,
 		&lastCompleted,
 		&lastAttempted,
@@ -372,7 +474,7 @@ func (p *Postgres) UpsertSourceSyncState(ctx context.Context, state model.Source
 		lastSucceeded = state.LastSucceededAt.UTC()
 	}
 
-	_, err := p.db.ExecContext(ctx, query,
+	_, err := p.runner().ExecContext(ctx, query,
 		state.SourceID,
 		lastCompleted,
 		lastAttempted,
@@ -401,7 +503,7 @@ func (p *Postgres) UpsertCloudVendorCost(ctx context.Context, cost model.CloudVe
 		id = cost.ID
 	}
 
-	_, err := p.db.ExecContext(ctx, query,
+	_, err := p.runner().ExecContext(ctx, query,
 		id,
 		cost.Provider,
 		cost.AccountID,

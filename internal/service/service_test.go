@@ -2,6 +2,8 @@ package service
 
 import (
 	"context"
+	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -45,12 +47,19 @@ func (f *fakeWindowSource) FetchWindow(_ context.Context, source config.Exporter
 }
 
 type memoryRepo struct {
+	mu          sync.Mutex
+	inTx        bool
 	checkpoints map[string]model.Checkpoint
 	buckets     map[string]model.MinuteBucket
 	ledgers     map[string]model.LedgerEntry
 	quotas      map[string]model.QuotaState
 	profiles    map[string]model.BillingProfile
 	sourceSync  map[string]model.SourceSyncState
+
+	upsertBucketErr     error
+	upsertLedgerErr     error
+	upsertQuotaStateErr error
+	upsertCheckpointErr error
 }
 
 func newMemoryRepo() *memoryRepo {
@@ -72,7 +81,70 @@ func bucketKey(bucket model.MinuteBucket) string {
 	return bucket.BucketStart.UTC().Format(time.RFC3339) + "\x00" + bucket.NodeID + "\x00" + bucket.AccountUUID + "\x00" + bucket.Region + "\x00" + bucket.LineCode
 }
 
+func (m *memoryRepo) WithinAccountSampleTx(_ context.Context, fn func(repository.Repository) error) error {
+	if m.inTx {
+		return fn(m)
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	staged := &memoryRepo{
+		inTx:                true,
+		checkpoints:         make(map[string]model.Checkpoint, len(m.checkpoints)),
+		buckets:             make(map[string]model.MinuteBucket, len(m.buckets)),
+		ledgers:             make(map[string]model.LedgerEntry, len(m.ledgers)),
+		quotas:              make(map[string]model.QuotaState, len(m.quotas)),
+		profiles:            make(map[string]model.BillingProfile, len(m.profiles)),
+		sourceSync:          make(map[string]model.SourceSyncState, len(m.sourceSync)),
+		upsertBucketErr:     m.upsertBucketErr,
+		upsertLedgerErr:     m.upsertLedgerErr,
+		upsertQuotaStateErr: m.upsertQuotaStateErr,
+		upsertCheckpointErr: m.upsertCheckpointErr,
+	}
+	for k, v := range m.checkpoints {
+		staged.checkpoints[k] = v
+	}
+	for k, v := range m.buckets {
+		staged.buckets[k] = v
+	}
+	for k, v := range m.ledgers {
+		staged.ledgers[k] = v
+	}
+	for k, v := range m.quotas {
+		staged.quotas[k] = cloneQuotaState(v)
+	}
+	for k, v := range m.profiles {
+		staged.profiles[k] = v
+	}
+	for k, v := range m.sourceSync {
+		staged.sourceSync[k] = cloneSyncState(v)
+	}
+
+	if err := fn(staged); err != nil {
+		return err
+	}
+
+	m.checkpoints = staged.checkpoints
+	m.buckets = staged.buckets
+	m.ledgers = staged.ledgers
+	m.quotas = staged.quotas
+	m.profiles = staged.profiles
+	m.sourceSync = staged.sourceSync
+	return nil
+}
+
+func cloneQuotaState(state model.QuotaState) model.QuotaState {
+	cloned := state
+	cloned.ArrearsSince = copyTimePtr(state.ArrearsSince)
+	cloned.LastRatedBucketAt = copyTimePtr(state.LastRatedBucketAt)
+	return cloned
+}
+
 func (m *memoryRepo) GetCheckpoint(_ context.Context, nodeID, accountUUID string) (*model.Checkpoint, error) {
+	if !m.inTx {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+	}
 	if checkpoint, ok := m.checkpoints[checkpointKey(nodeID, accountUUID)]; ok {
 		copy := checkpoint
 		return &copy, nil
@@ -81,47 +153,111 @@ func (m *memoryRepo) GetCheckpoint(_ context.Context, nodeID, accountUUID string
 }
 
 func (m *memoryRepo) UpsertCheckpoint(_ context.Context, checkpoint model.Checkpoint) error {
+	if !m.inTx {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+	}
+	if m.upsertCheckpointErr != nil {
+		return m.upsertCheckpointErr
+	}
 	m.checkpoints[checkpointKey(checkpoint.NodeID, checkpoint.AccountUUID)] = checkpoint
 	return nil
 }
 
+func (m *memoryRepo) GetMinuteBucket(_ context.Context, key model.MinuteBucket) (*model.MinuteBucket, error) {
+	if !m.inTx {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+	}
+	if bucket, ok := m.buckets[bucketKey(key)]; ok {
+		copy := bucket
+		return &copy, nil
+	}
+	return nil, nil
+}
+
 func (m *memoryRepo) UpsertMinuteBucket(_ context.Context, bucket model.MinuteBucket) (bool, error) {
+	if !m.inTx {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+	}
+	if m.upsertBucketErr != nil {
+		return false, m.upsertBucketErr
+	}
 	key := bucketKey(bucket)
 	_, existed := m.buckets[key]
 	m.buckets[key] = bucket
 	return existed, nil
 }
 
+func (m *memoryRepo) GetLedger(_ context.Context, id string) (*model.LedgerEntry, error) {
+	if !m.inTx {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+	}
+	if entry, ok := m.ledgers[id]; ok {
+		copy := entry
+		return &copy, nil
+	}
+	return nil, nil
+}
+
 func (m *memoryRepo) UpsertLedger(_ context.Context, entry model.LedgerEntry) (bool, error) {
+	if !m.inTx {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+	}
+	if m.upsertLedgerErr != nil {
+		return false, m.upsertLedgerErr
+	}
 	_, existed := m.ledgers[entry.ID]
 	m.ledgers[entry.ID] = entry
 	return existed, nil
 }
 
 func (m *memoryRepo) GetQuotaState(_ context.Context, accountUUID string) (*model.QuotaState, error) {
+	if !m.inTx {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+	}
 	if quota, ok := m.quotas[accountUUID]; ok {
-		copy := quota
+		copy := cloneQuotaState(quota)
 		return &copy, nil
 	}
 	return nil, nil
 }
 
 func (m *memoryRepo) UpsertQuotaState(_ context.Context, state model.QuotaState) error {
-	m.quotas[state.AccountUUID] = state
+	if !m.inTx {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+	}
+	if m.upsertQuotaStateErr != nil {
+		return m.upsertQuotaStateErr
+	}
+	m.quotas[state.AccountUUID] = cloneQuotaState(state)
 	return nil
 }
 
 func (m *memoryRepo) ListArrearsAccounts(_ context.Context) ([]model.QuotaState, error) {
+	if !m.inTx {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+	}
 	var states []model.QuotaState
 	for _, quota := range m.quotas {
 		if quota.Arrears && quota.SuspendState != "suspended" {
-			states = append(states, quota)
+			states = append(states, cloneQuotaState(quota))
 		}
 	}
 	return states, nil
 }
 
 func (m *memoryRepo) GetBillingProfile(_ context.Context, accountUUID string) (*model.BillingProfile, error) {
+	if !m.inTx {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+	}
 	if profile, ok := m.profiles[accountUUID]; ok {
 		copy := profile
 		return &copy, nil
@@ -130,6 +266,10 @@ func (m *memoryRepo) GetBillingProfile(_ context.Context, accountUUID string) (*
 }
 
 func (m *memoryRepo) GetSourceSyncState(_ context.Context, sourceID string) (*model.SourceSyncState, error) {
+	if !m.inTx {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+	}
 	if state, ok := m.sourceSync[sourceID]; ok {
 		copy := cloneSyncState(state)
 		return &copy, nil
@@ -138,6 +278,10 @@ func (m *memoryRepo) GetSourceSyncState(_ context.Context, sourceID string) (*mo
 }
 
 func (m *memoryRepo) UpsertSourceSyncState(_ context.Context, state model.SourceSyncState) error {
+	if !m.inTx {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+	}
 	m.sourceSync[state.SourceID] = cloneSyncState(state)
 	return nil
 }
@@ -356,7 +500,7 @@ func TestNegativeDeltaProtection(t *testing.T) {
 		AccountUUID:       accountUUID,
 		LastUplinkTotal:   200,
 		LastDownlinkTotal: 200,
-		LastSeenAt:        time.Now().UTC(),
+		LastSeenAt:        time.Date(2026, 4, 8, 10, 30, 0, 0, time.UTC),
 		XrayRevision:      "prev",
 		ResetEpoch:        0,
 	}
@@ -401,7 +545,7 @@ func TestRestartRecoveryFromCheckpoint(t *testing.T) {
 		AccountUUID:       accountUUID,
 		LastUplinkTotal:   100,
 		LastDownlinkTotal: 100,
-		LastSeenAt:        time.Now().UTC(),
+		LastSeenAt:        time.Date(2026, 4, 8, 10, 31, 0, 0, time.UTC),
 	}
 	source := &fakeWindowSource{
 		pagesBySource: map[string][]model.SnapshotWindowPage{
@@ -746,7 +890,7 @@ func TestMultiInboundOneInboundStopsReportingIsConservativeReset(t *testing.T) {
 		NodeID:          nodeKey,
 		AccountUUID:     accountUUID,
 		LastUplinkTotal: 150,
-		LastSeenAt:      time.Now().UTC(),
+		LastSeenAt:      time.Date(2026, 4, 8, 10, 31, 0, 0, time.UTC),
 	}
 	source := &fakeWindowSource{
 		pagesBySource: map[string][]model.SnapshotWindowPage{
@@ -818,5 +962,333 @@ func TestMultiInboundDuplicateWindowIsReplaySafe(t *testing.T) {
 	}
 	if len(repo.ledgers) != 1 {
 		t.Fatalf("expected exactly 1 ledger entry despite replay, got %d", len(repo.ledgers))
+	}
+}
+
+func TestExactDuplicateReplayPreservesBucketAndLedgerWithoutZeroing(t *testing.T) {
+	repo := newMemoryRepo()
+	accountUUID := "11111111-1111-1111-1111-111111111111"
+	nodeKey := composeStorageNodeID("uat", "uat-node")
+	cfg := baseConfig()
+	cfg.ExporterSources = nil
+	cfg.PullEnabled = false
+	svc := New(cfg, &fakeWindowSource{}, repo)
+
+	snapshot := model.Snapshot{
+		CollectedAt: time.Date(2026, 4, 8, 10, 30, 30, 0, time.UTC),
+		NodeID:      "uat-node",
+		Env:         "uat",
+		Samples: []model.Sample{{
+			UUID:               accountUUID,
+			Email:              "user@example.com",
+			UplinkBytesTotal:   100,
+			DownlinkBytesTotal: 50,
+		}},
+	}
+
+	first, err := svc.IngestSnapshot(context.Background(), snapshot)
+	if err != nil {
+		t.Fatalf("first ingest: %v", err)
+	}
+	if first.ProcessedSamples != 1 || first.WrittenMinutes != 1 || first.ReplayedMinutes != 0 {
+		t.Fatalf("unexpected first result: %#v", first)
+	}
+
+	second, err := svc.IngestSnapshot(context.Background(), snapshot)
+	if err != nil {
+		t.Fatalf("second ingest: %v", err)
+	}
+	if second.ProcessedSamples != 1 || second.ReplayedMinutes != 1 {
+		t.Fatalf("unexpected second result: %#v", second)
+	}
+
+	bucket := repo.buckets[bucketKey(model.MinuteBucket{
+		BucketStart: time.Date(2026, 4, 8, 10, 30, 0, 0, time.UTC),
+		NodeID:      nodeKey,
+		AccountUUID: accountUUID,
+	})]
+	if bucket.UplinkBytes != 100 || bucket.DownlinkBytes != 50 || bucket.TotalBytes != 150 {
+		t.Fatalf("duplicate replay zeroed or corrupted minute bucket: %#v", bucket)
+	}
+
+	if len(repo.ledgers) != 1 {
+		t.Fatalf("expected 1 ledger entry, got %d", len(repo.ledgers))
+	}
+	for _, entry := range repo.ledgers {
+		if entry.RatedBytes != 150 || entry.AmountDelta != -75 || entry.BalanceAfter != -75 {
+			t.Fatalf("duplicate replay zeroed or corrupted ledger entry: %#v", entry)
+		}
+	}
+
+	quota := repo.quotas[accountUUID]
+	if quota.CurrentBalance != -75 {
+		t.Fatalf("expected balance -75 without double charge, got %v", quota.CurrentBalance)
+	}
+}
+
+func TestStaleOutOfOrderSnapshotIsIgnoredWithoutFalseReset(t *testing.T) {
+	repo := newMemoryRepo()
+	accountUUID := "11111111-1111-1111-1111-111111111111"
+	nodeKey := composeStorageNodeID("uat", "uat-node")
+	cfg := baseConfig()
+	cfg.ExporterSources = nil
+	cfg.PullEnabled = false
+	svc := New(cfg, &fakeWindowSource{}, repo)
+
+	newer := model.Snapshot{
+		CollectedAt: time.Date(2026, 4, 8, 10, 31, 0, 0, time.UTC),
+		NodeID:      "uat-node",
+		Env:         "uat",
+		Samples: []model.Sample{{
+			UUID:               accountUUID,
+			UplinkBytesTotal:   200,
+			DownlinkBytesTotal: 100,
+		}},
+	}
+	if _, err := svc.IngestSnapshot(context.Background(), newer); err != nil {
+		t.Fatalf("ingest newer snapshot: %v", err)
+	}
+
+	stale := model.Snapshot{
+		CollectedAt: time.Date(2026, 4, 8, 10, 30, 0, 0, time.UTC),
+		NodeID:      "uat-node",
+		Env:         "uat",
+		Samples: []model.Sample{{
+			UUID:               accountUUID,
+			UplinkBytesTotal:   120,
+			DownlinkBytesTotal: 60,
+		}},
+	}
+	res, err := svc.IngestSnapshot(context.Background(), stale)
+	if err != nil {
+		t.Fatalf("ingest stale snapshot: %v", err)
+	}
+	if res.ProcessedSamples != 0 {
+		t.Fatalf("expected stale snapshot to be ignored, got %#v", res)
+	}
+
+	cp := repo.checkpoints[checkpointKey(nodeKey, accountUUID)]
+	if cp.ResetEpoch != 0 {
+		t.Fatalf("stale snapshot triggered false counter reset: reset_epoch=%d", cp.ResetEpoch)
+	}
+	if cp.LastUplinkTotal != 200 || cp.LastDownlinkTotal != 100 {
+		t.Fatalf("stale snapshot overwrote checkpoint totals: %#v", cp)
+	}
+	if !cp.LastSeenAt.Equal(newer.CollectedAt) {
+		t.Fatalf("stale snapshot rewound checkpoint last_seen_at: %v", cp.LastSeenAt)
+	}
+	if len(repo.buckets) != 1 || len(repo.ledgers) != 1 {
+		t.Fatalf("stale snapshot wrote unexpected bucket/ledger rows: buckets=%d ledgers=%d", len(repo.buckets), len(repo.ledgers))
+	}
+	if got := repo.quotas[accountUUID].CurrentBalance; got != -150 {
+		t.Fatalf("expected balance -150 to remain unchanged, got %v", got)
+	}
+}
+
+func TestSameMinuteMultipleIncreasingSnapshotsAccumulateWithoutLossOrDoubleCharge(t *testing.T) {
+	repo := newMemoryRepo()
+	accountUUID := "11111111-1111-1111-1111-111111111111"
+	nodeKey := composeStorageNodeID("uat", "uat-node")
+	repo.profiles[accountUUID] = model.BillingProfile{
+		AccountUUID:        accountUUID,
+		PackageName:        "starter",
+		IncludedQuotaBytes: 120,
+		BasePricePerByte:   0.5,
+		RegionMultiplier:   1.0,
+		LineMultiplier:     1.0,
+		PricingRuleVersion: "pricing-v1",
+	}
+	cfg := baseConfig()
+	cfg.ExporterSources = nil
+	cfg.PullEnabled = false
+	svc := New(cfg, &fakeWindowSource{}, repo)
+
+	snap1 := model.Snapshot{
+		CollectedAt: time.Date(2026, 4, 8, 10, 30, 10, 0, time.UTC),
+		NodeID:      "uat-node",
+		Env:         "uat",
+		Samples: []model.Sample{{
+			UUID:               accountUUID,
+			UplinkBytesTotal:   70,
+			DownlinkBytesTotal: 30,
+		}},
+	}
+	// +150B in the same UTC minute (total 250B across snap1 + snap2)
+	snap2 := model.Snapshot{
+		CollectedAt: time.Date(2026, 4, 8, 10, 30, 50, 0, time.UTC),
+		NodeID:      "uat-node",
+		Env:         "uat",
+		Samples: []model.Sample{{
+			UUID:               accountUUID,
+			UplinkBytesTotal:   170,
+			DownlinkBytesTotal: 80,
+		}},
+	}
+
+	if _, err := svc.IngestSnapshot(context.Background(), snap1); err != nil {
+		t.Fatalf("ingest snap1: %v", err)
+	}
+	if _, err := svc.IngestSnapshot(context.Background(), snap2); err != nil {
+		t.Fatalf("ingest snap2: %v", err)
+	}
+
+	bucket := repo.buckets[bucketKey(model.MinuteBucket{
+		BucketStart: time.Date(2026, 4, 8, 10, 30, 0, 0, time.UTC),
+		NodeID:      nodeKey,
+		AccountUUID: accountUUID,
+	})]
+	if bucket.UplinkBytes != 170 || bucket.DownlinkBytes != 80 || bucket.TotalBytes != 250 {
+		t.Fatalf("expected cumulative minute bucket 170/80/250, got %#v", bucket)
+	}
+
+	// Total 250B minus 120B included quota = 130B chargeable @ 0.5 = -65
+	quota := repo.quotas[accountUUID]
+	if quota.RemainingIncludedQuota != 0 {
+		t.Fatalf("expected remaining included quota 0, got %d", quota.RemainingIncludedQuota)
+	}
+	if quota.CurrentBalance != -65 {
+		t.Fatalf("expected balance -65 for 130 chargeable bytes, got %v", quota.CurrentBalance)
+	}
+
+	if len(repo.ledgers) != 1 {
+		t.Fatalf("expected 1 ledger entry for the minute, got %d", len(repo.ledgers))
+	}
+	for _, entry := range repo.ledgers {
+		if entry.RatedBytes != 130 || entry.AmountDelta != -65 || entry.BalanceAfter != -65 {
+			t.Fatalf("expected cumulative ledger rated_bytes=130 amount_delta=-65 balance_after=-65, got %#v", entry)
+		}
+	}
+
+	// Re-delivering both snap1 (now stale) and snap2 (now duplicate) must be a no-op on state.
+	if _, err := svc.IngestSnapshot(context.Background(), snap1); err != nil {
+		t.Fatalf("re-ingest snap1: %v", err)
+	}
+	if _, err := svc.IngestSnapshot(context.Background(), snap2); err != nil {
+		t.Fatalf("re-ingest snap2: %v", err)
+	}
+	if got := repo.quotas[accountUUID].CurrentBalance; got != -65 {
+		t.Fatalf("expected balance -65 after replay of snap1+snap2, got %v", got)
+	}
+}
+
+func TestAtomicSampleTransactionRollsBackOnPartialFailureAndSucceedsOnRetry(t *testing.T) {
+	accountUUID := "11111111-1111-1111-1111-111111111111"
+	snapshot := model.Snapshot{
+		CollectedAt: time.Date(2026, 4, 8, 10, 30, 15, 0, time.UTC),
+		NodeID:      "uat-node",
+		Env:         "uat",
+		Samples: []model.Sample{{
+			UUID:               accountUUID,
+			UplinkBytesTotal:   100,
+			DownlinkBytesTotal: 50,
+		}},
+	}
+
+	steps := []struct {
+		name   string
+		inject func(r *memoryRepo)
+		clear  func(r *memoryRepo)
+	}{
+		{
+			name:   "UpsertMinuteBucketError",
+			inject: func(r *memoryRepo) { r.upsertBucketErr = errors.New("bucket write failed") },
+			clear:  func(r *memoryRepo) { r.upsertBucketErr = nil },
+		},
+		{
+			name:   "UpsertLedgerError",
+			inject: func(r *memoryRepo) { r.upsertLedgerErr = errors.New("ledger write failed") },
+			clear:  func(r *memoryRepo) { r.upsertLedgerErr = nil },
+		},
+		{
+			name:   "UpsertQuotaStateError",
+			inject: func(r *memoryRepo) { r.upsertQuotaStateErr = errors.New("quota write failed") },
+			clear:  func(r *memoryRepo) { r.upsertQuotaStateErr = nil },
+		},
+		{
+			name:   "UpsertCheckpointError",
+			inject: func(r *memoryRepo) { r.upsertCheckpointErr = errors.New("checkpoint write failed") },
+			clear:  func(r *memoryRepo) { r.upsertCheckpointErr = nil },
+		},
+	}
+
+	for _, tc := range steps {
+		t.Run(tc.name, func(t *testing.T) {
+			repo := newMemoryRepo()
+			cfg := baseConfig()
+			cfg.ExporterSources = nil
+			cfg.PullEnabled = false
+			svc := New(cfg, &fakeWindowSource{}, repo)
+
+			tc.inject(repo)
+			if _, err := svc.IngestSnapshot(context.Background(), snapshot); err == nil {
+				t.Fatalf("expected error from %s", tc.name)
+			}
+
+			// Verify full atomic rollback: no partial bucket, ledger, quota, or checkpoint left behind.
+			if len(repo.buckets) != 0 || len(repo.ledgers) != 0 || len(repo.quotas) != 0 || len(repo.checkpoints) != 0 {
+				t.Fatalf("partial state leaked after %s rollback: buckets=%d ledgers=%d quotas=%d checkpoints=%d",
+					tc.name, len(repo.buckets), len(repo.ledgers), len(repo.quotas), len(repo.checkpoints))
+			}
+
+			// Clear error and retry: must succeed cleanly and charge exactly once.
+			tc.clear(repo)
+			res, err := svc.IngestSnapshot(context.Background(), snapshot)
+			if err != nil {
+				t.Fatalf("retry after %s: %v", tc.name, err)
+			}
+			if res.ProcessedSamples != 1 || res.WrittenMinutes != 1 {
+				t.Fatalf("unexpected retry result: %#v", res)
+			}
+			if got := repo.quotas[accountUUID].CurrentBalance; got != -75 {
+				t.Fatalf("expected balance -75 after retry, got %v", got)
+			}
+		})
+	}
+}
+
+func TestConcurrentDuplicateSnapshotDeliveriesAreRaceAndDoubleChargeSafe(t *testing.T) {
+	repo := newMemoryRepo()
+	accountUUID := "11111111-1111-1111-1111-111111111111"
+	cfg := baseConfig()
+	cfg.ExporterSources = nil
+	cfg.PullEnabled = false
+
+	snapshot := model.Snapshot{
+		CollectedAt: time.Date(2026, 4, 8, 10, 30, 30, 0, time.UTC),
+		NodeID:      "uat-node",
+		Env:         "uat",
+		Samples: []model.Sample{{
+			UUID:               accountUUID,
+			UplinkBytesTotal:   100,
+			DownlinkBytesTotal: 50,
+		}},
+	}
+
+	const workers = 8
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	for i := 0; i < workers; i++ {
+		go func() {
+			defer wg.Done()
+			svc := New(cfg, &fakeWindowSource{}, repo)
+			if _, err := svc.IngestSnapshot(context.Background(), snapshot); err != nil {
+				t.Errorf("concurrent ingest error: %v", err)
+			}
+		}()
+	}
+	wg.Wait()
+
+	if got := repo.quotas[accountUUID].CurrentBalance; got != -75 {
+		t.Fatalf("expected single charge of -75 across %d concurrent deliveries, got %v", workers, got)
+	}
+	for _, bucket := range repo.buckets {
+		if bucket.TotalBytes != 150 {
+			t.Fatalf("expected bucket total_bytes=150, got %d", bucket.TotalBytes)
+		}
+	}
+	for _, entry := range repo.ledgers {
+		if entry.RatedBytes != 150 || entry.AmountDelta != -75 {
+			t.Fatalf("expected ledger rated_bytes=150 amount_delta=-75, got %#v", entry)
+		}
 	}
 }

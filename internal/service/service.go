@@ -13,6 +13,10 @@ import (
 	"billing-service/internal/repository"
 
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
 const (
@@ -323,148 +327,214 @@ func aggregateSamplesByUUID(samples []model.Sample, result *model.JobResult) []m
 
 func (s *Service) processSample(ctx context.Context, snapshot model.Snapshot, sample model.Sample, result *model.JobResult) (bool, error) {
 	storageNodeID := composeStorageNodeID(snapshot.Env, snapshot.NodeID)
-	minuteStart := snapshot.CollectedAt.UTC().Truncate(time.Minute)
+	collectedAt := snapshot.CollectedAt.UTC()
+	minuteStart := collectedAt.Truncate(time.Minute)
 
-	checkpoint, err := s.repo.GetCheckpoint(ctx, storageNodeID, sample.UUID)
-	if err != nil {
-		return false, fmt.Errorf("get checkpoint %s: %w", sample.UUID, err)
-	}
+	ctx, span := otel.Tracer("billing-service").Start(ctx, "billing.accounting.transaction",
+		trace.WithAttributes(
+			attribute.String("stage", "transaction"),
+			attribute.String("billing.node_id", strings.TrimSpace(snapshot.NodeID)),
+			attribute.String("billing.env", strings.TrimSpace(snapshot.Env)),
+		),
+	)
+	defer span.End()
 
-	deltaUplink := sample.UplinkBytesTotal
-	deltaDownlink := sample.DownlinkBytesTotal
-	resetEpoch := int64(0)
-	if checkpoint != nil {
-		deltaUplink = sample.UplinkBytesTotal - checkpoint.LastUplinkTotal
-		deltaDownlink = sample.DownlinkBytesTotal - checkpoint.LastDownlinkTotal
-		resetEpoch = checkpoint.ResetEpoch
-	}
+	var (
+		processed     bool
+		writtenDelta  int
+		replayedDelta int
+	)
 
-	if deltaUplink < 0 || deltaDownlink < 0 {
-		resetEpoch++
-		err := s.repo.UpsertCheckpoint(ctx, model.Checkpoint{
+	err := s.repo.WithinAccountSampleTx(ctx, func(txRepo repository.Repository) error {
+		checkpoint, err := txRepo.GetCheckpoint(ctx, storageNodeID, sample.UUID)
+		if err != nil {
+			return fmt.Errorf("get checkpoint %s: %w", sample.UUID, err)
+		}
+
+		if checkpoint != nil && !checkpoint.LastSeenAt.IsZero() {
+			lastSeen := checkpoint.LastSeenAt.UTC()
+			if collectedAt.Before(lastSeen) {
+				processed = false
+				return nil
+			}
+			if collectedAt.Equal(lastSeen) &&
+				sample.UplinkBytesTotal == checkpoint.LastUplinkTotal &&
+				sample.DownlinkBytesTotal == checkpoint.LastDownlinkTotal {
+				replayedDelta = 1
+				processed = true
+				return nil
+			}
+		}
+
+		deltaUplink := sample.UplinkBytesTotal
+		deltaDownlink := sample.DownlinkBytesTotal
+		resetEpoch := int64(0)
+		if checkpoint != nil {
+			deltaUplink = sample.UplinkBytesTotal - checkpoint.LastUplinkTotal
+			deltaDownlink = sample.DownlinkBytesTotal - checkpoint.LastDownlinkTotal
+			resetEpoch = checkpoint.ResetEpoch
+		}
+
+		if deltaUplink < 0 || deltaDownlink < 0 {
+			resetEpoch++
+			err := txRepo.UpsertCheckpoint(ctx, model.Checkpoint{
+				NodeID:            storageNodeID,
+				AccountUUID:       sample.UUID,
+				LastUplinkTotal:   sample.UplinkBytesTotal,
+				LastDownlinkTotal: sample.DownlinkBytesTotal,
+				LastSeenAt:        collectedAt,
+				XrayRevision:      s.cfg.SourceRevision,
+				ResetEpoch:        resetEpoch,
+			})
+			if err != nil {
+				return fmt.Errorf("upsert reset checkpoint %s: %w", sample.UUID, err)
+			}
+			processed = false
+			return nil
+		}
+
+		totalBytes := deltaUplink + deltaDownlink
+		profile, err := txRepo.GetBillingProfile(ctx, sample.UUID)
+		if err != nil {
+			return fmt.Errorf("get billing profile %s: %w", sample.UUID, err)
+		}
+		effectivePricing := resolvePricing(profile, s.cfg)
+
+		bucket := model.MinuteBucket{
+			BucketStart:    minuteStart,
+			NodeID:         storageNodeID,
+			AccountUUID:    sample.UUID,
+			Region:         s.cfg.DefaultRegion,
+			LineCode:       strings.TrimSpace(sample.InboundTag),
+			UplinkBytes:    deltaUplink,
+			DownlinkBytes:  deltaDownlink,
+			TotalBytes:     totalBytes,
+			Multiplier:     effectivePricing.multiplier,
+			RatingStatus:   "rated",
+			SourceRevision: effectivePricing.pricingRuleVersion,
+		}
+
+		existingBucket, err := txRepo.GetMinuteBucket(ctx, bucket)
+		if err != nil {
+			return fmt.Errorf("get minute bucket %s: %w", sample.UUID, err)
+		}
+		if existingBucket != nil && checkpoint != nil {
+			bucket.UplinkBytes = existingBucket.UplinkBytes + deltaUplink
+			bucket.DownlinkBytes = existingBucket.DownlinkBytes + deltaDownlink
+			bucket.TotalBytes = bucket.UplinkBytes + bucket.DownlinkBytes
+		}
+
+		minuteExisted, err := txRepo.UpsertMinuteBucket(ctx, bucket)
+		if err != nil {
+			return fmt.Errorf("upsert minute bucket %s: %w", sample.UUID, err)
+		}
+		if !minuteExisted || (checkpoint != nil && totalBytes > 0) {
+			writtenDelta++
+		} else {
+			replayedDelta++
+		}
+
+		ledgerID := deterministicLedgerID(bucket)
+		existingLedger, err := txRepo.GetLedger(ctx, ledgerID)
+		if err != nil {
+			return fmt.Errorf("get ledger %s: %w", sample.UUID, err)
+		}
+
+		quota, err := txRepo.GetQuotaState(ctx, sample.UUID)
+		if err != nil {
+			return fmt.Errorf("get quota state %s: %w", sample.UUID, err)
+		}
+		if quota == nil {
+			quota = &model.QuotaState{
+				AccountUUID:            sample.UUID,
+				RemainingIncludedQuota: effectivePricing.includedQuotaBytes,
+				CurrentBalance:         s.cfg.InitialBalance,
+				ThrottleState:          "normal",
+				SuspendState:           "active",
+				EffectiveAt:            collectedAt,
+			}
+		}
+
+		includedApplied := minInt64(quota.RemainingIncludedQuota, totalBytes)
+		chargeableBytes := totalBytes - includedApplied
+		amountDelta := -float64(chargeableBytes) * effectivePricing.basePricePerByte * effectivePricing.multiplier
+
+		entry := model.LedgerEntry{
+			ID:                 ledgerID,
+			AccountUUID:        sample.UUID,
+			BucketStart:        minuteStart,
+			BucketEnd:          minuteStart.Add(time.Minute),
+			EntryType:          "traffic_charge",
+			RatedBytes:         chargeableBytes,
+			AmountDelta:        amountDelta,
+			BalanceAfter:       quota.CurrentBalance + amountDelta,
+			PricingRuleVersion: effectivePricing.pricingRuleVersion,
+		}
+		if existingLedger != nil && checkpoint != nil {
+			entry.RatedBytes = existingLedger.RatedBytes + chargeableBytes
+			entry.AmountDelta = existingLedger.AmountDelta + amountDelta
+			entry.BalanceAfter = quota.CurrentBalance + amountDelta
+		}
+
+		ledgerExisted, err := txRepo.UpsertLedger(ctx, entry)
+		if err != nil {
+			return fmt.Errorf("upsert ledger %s: %w", sample.UUID, err)
+		}
+
+		if !ledgerExisted || checkpoint != nil {
+			remainingQuota := quota.RemainingIncludedQuota - includedApplied
+			if remainingQuota < 0 {
+				remainingQuota = 0
+			}
+			quota.RemainingIncludedQuota = remainingQuota
+			quota.CurrentBalance = entry.BalanceAfter
+			quota.Arrears = quota.CurrentBalance < 0
+			if quota.Arrears {
+				quota.ThrottleState = "throttled"
+				if quota.ArrearsSince == nil {
+					since := collectedAt
+					quota.ArrearsSince = &since
+				}
+			} else {
+				quota.ThrottleState = "normal"
+				quota.ArrearsSince = nil
+			}
+			quota.EffectiveAt = collectedAt
+			lastRated := minuteStart
+			quota.LastRatedBucketAt = &lastRated
+			if err := txRepo.UpsertQuotaState(ctx, *quota); err != nil {
+				return fmt.Errorf("upsert quota state %s: %w", sample.UUID, err)
+			}
+		} else {
+			replayedDelta++
+		}
+
+		if err := txRepo.UpsertCheckpoint(ctx, model.Checkpoint{
 			NodeID:            storageNodeID,
 			AccountUUID:       sample.UUID,
 			LastUplinkTotal:   sample.UplinkBytesTotal,
 			LastDownlinkTotal: sample.DownlinkBytesTotal,
-			LastSeenAt:        snapshot.CollectedAt.UTC(),
+			LastSeenAt:        collectedAt,
 			XrayRevision:      s.cfg.SourceRevision,
 			ResetEpoch:        resetEpoch,
-		})
-		if err != nil {
-			return false, fmt.Errorf("upsert reset checkpoint %s: %w", sample.UUID, err)
+		}); err != nil {
+			return fmt.Errorf("upsert checkpoint %s: %w", sample.UUID, err)
 		}
-		return false, nil
-	}
 
-	totalBytes := deltaUplink + deltaDownlink
-	profile, err := s.repo.GetBillingProfile(ctx, sample.UUID)
+		processed = true
+		return nil
+	})
 	if err != nil {
-		return false, fmt.Errorf("get billing profile %s: %w", sample.UUID, err)
-	}
-	effectivePricing := resolvePricing(profile, s.cfg)
-
-	bucket := model.MinuteBucket{
-		BucketStart:    minuteStart,
-		NodeID:         storageNodeID,
-		AccountUUID:    sample.UUID,
-		Region:         s.cfg.DefaultRegion,
-		LineCode:       strings.TrimSpace(sample.InboundTag),
-		UplinkBytes:    deltaUplink,
-		DownlinkBytes:  deltaDownlink,
-		TotalBytes:     totalBytes,
-		Multiplier:     effectivePricing.multiplier,
-		RatingStatus:   "rated",
-		SourceRevision: effectivePricing.pricingRuleVersion,
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		span.SetAttributes(attribute.String("outcome", "rolled_back"))
+		return false, err
 	}
 
-	minuteExisted, err := s.repo.UpsertMinuteBucket(ctx, bucket)
-	if err != nil {
-		return false, fmt.Errorf("upsert minute bucket %s: %w", sample.UUID, err)
-	}
-	if minuteExisted {
-		result.ReplayedMinutes++
-	} else {
-		result.WrittenMinutes++
-	}
-
-	entry := model.LedgerEntry{
-		ID:                 deterministicLedgerID(bucket),
-		AccountUUID:        sample.UUID,
-		BucketStart:        minuteStart,
-		BucketEnd:          minuteStart.Add(time.Minute),
-		EntryType:          "traffic_charge",
-		PricingRuleVersion: s.cfg.SourceRevision,
-	}
-
-	quota, err := s.repo.GetQuotaState(ctx, sample.UUID)
-	if err != nil {
-		return false, fmt.Errorf("get quota state %s: %w", sample.UUID, err)
-	}
-	if quota == nil {
-		quota = &model.QuotaState{
-			AccountUUID:            sample.UUID,
-			RemainingIncludedQuota: effectivePricing.includedQuotaBytes,
-			CurrentBalance:         s.cfg.InitialBalance,
-			ThrottleState:          "normal",
-			SuspendState:           "active",
-			EffectiveAt:            snapshot.CollectedAt.UTC(),
-		}
-	}
-
-	includedApplied := minInt64(quota.RemainingIncludedQuota, totalBytes)
-	chargeableBytes := totalBytes - includedApplied
-	amountDelta := -float64(chargeableBytes) * effectivePricing.basePricePerByte * effectivePricing.multiplier
-	entry.RatedBytes = chargeableBytes
-	entry.AmountDelta = amountDelta
-	entry.PricingRuleVersion = effectivePricing.pricingRuleVersion
-	entry.BalanceAfter = quota.CurrentBalance + amountDelta
-
-	ledgerExisted, err := s.repo.UpsertLedger(ctx, entry)
-	if err != nil {
-		return false, fmt.Errorf("upsert ledger %s: %w", sample.UUID, err)
-	}
-
-	if !ledgerExisted {
-		remainingQuota := quota.RemainingIncludedQuota - includedApplied
-		if remainingQuota < 0 {
-			remainingQuota = 0
-		}
-		quota.RemainingIncludedQuota = remainingQuota
-		quota.CurrentBalance = entry.BalanceAfter
-		quota.Arrears = quota.CurrentBalance < 0
-		if quota.Arrears {
-			quota.ThrottleState = "throttled"
-			if quota.ArrearsSince == nil {
-				since := snapshot.CollectedAt.UTC()
-				quota.ArrearsSince = &since
-			}
-		} else {
-			quota.ThrottleState = "normal"
-			quota.ArrearsSince = nil
-		}
-		quota.EffectiveAt = snapshot.CollectedAt.UTC()
-		lastRated := minuteStart
-		quota.LastRatedBucketAt = &lastRated
-		if err := s.repo.UpsertQuotaState(ctx, *quota); err != nil {
-			return false, fmt.Errorf("upsert quota state %s: %w", sample.UUID, err)
-		}
-	} else {
-		result.ReplayedMinutes++
-	}
-
-	if err := s.repo.UpsertCheckpoint(ctx, model.Checkpoint{
-		NodeID:            storageNodeID,
-		AccountUUID:       sample.UUID,
-		LastUplinkTotal:   sample.UplinkBytesTotal,
-		LastDownlinkTotal: sample.DownlinkBytesTotal,
-		LastSeenAt:        snapshot.CollectedAt.UTC(),
-		XrayRevision:      s.cfg.SourceRevision,
-		ResetEpoch:        resetEpoch,
-	}); err != nil {
-		return false, fmt.Errorf("upsert checkpoint %s: %w", sample.UUID, err)
-	}
-
-	return true, nil
+	span.SetAttributes(attribute.String("outcome", "committed"))
+	result.WrittenMinutes += writtenDelta
+	result.ReplayedMinutes += replayedDelta
+	return processed, nil
 }
 
 type effectivePricing struct {

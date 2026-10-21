@@ -7,9 +7,12 @@ import (
 )
 
 type Repository interface {
+	WithinAccountSampleTx(ctx context.Context, fn func(Repository) error) error
 	GetCheckpoint(ctx context.Context, nodeID, accountUUID string) (*model.Checkpoint, error)
 	UpsertCheckpoint(ctx context.Context, checkpoint model.Checkpoint) error
+	GetMinuteBucket(ctx context.Context, bucket model.MinuteBucket) (*model.MinuteBucket, error)
 	UpsertMinuteBucket(ctx context.Context, bucket model.MinuteBucket) (bool, error)
+	GetLedger(ctx context.Context, id string) (*model.LedgerEntry, error)
 	UpsertLedger(ctx context.Context, entry model.LedgerEntry) (bool, error)
 	GetQuotaState(ctx context.Context, accountUUID string) (*model.QuotaState, error)
 	UpsertQuotaState(ctx context.Context, state model.QuotaState) error
