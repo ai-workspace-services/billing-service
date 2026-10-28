@@ -96,6 +96,8 @@ jobs:
       push_image: ${{ steps.flags.outputs.push_image }}
     steps:
       - uses: actions/checkout@v4
+      - name: Test Main image evidence contract
+        run: python3 .github/scripts/test_write_main_image_build.py
       - name: Resolve Pipeline Flags
         id: flags
         env:
@@ -111,6 +113,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        id: source
         with:
           ref: ${{ inputs.source_ref || github.ref }}
 
@@ -171,12 +174,30 @@ jobs:
             type=sha,format=long
 
       - name: Build and push
+        id: publish
         uses: docker/build-push-action@v6
         with:
           context: .
           push: ${{ needs.prep.outputs.push_image == 'true' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+
+      - name: Record immutable Main image evidence
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.prep.outputs.push_image == 'true'
+        env:
+          CHECKED_OUT_SHA: ${{ steps.source.outputs.commit }}
+          IMAGE_DIGEST: ${{ steps.publish.outputs.digest }}
+          EVIDENCE_PATH: ${{ runner.temp }}/main-image-build.json
+        run: python3 .github/scripts/write-main-image-build.py
+
+      - name: Retain immutable Main image evidence
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.prep.outputs.push_image == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: billing-main-image-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/main-image-build.json
+          if-no-files-found: error
+          retention-days: 30
 
   publish_artifact_registry:
     needs: managed_database_runtime
