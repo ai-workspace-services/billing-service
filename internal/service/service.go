@@ -36,10 +36,14 @@ type Service struct {
 }
 
 func New(cfg config.Config, source windowSource, repo repository.Repository) *Service {
+	// Push mode does not run the exporter collection loop. Its absence is not
+	// a failed collection; database readiness is checked separately by /readyz.
+	pushOnly := cfg.IngestMode == "push" && !cfg.PullEnabled && len(cfg.ExporterSources) == 0
 	return &Service{
 		cfg:    cfg,
 		source: source,
 		repo:   repo,
+		lastOK: pushOnly,
 	}
 }
 
