@@ -62,6 +62,8 @@ type LedgerEntry struct {
 }
 
 type QuotaState struct {
+	PeriodStart            *time.Time
+	PeriodEnd              *time.Time
 	AccountUUID            string
 	RemainingIncludedQuota int64
 	CurrentBalance         float64

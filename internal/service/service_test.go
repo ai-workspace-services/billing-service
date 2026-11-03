@@ -820,3 +820,32 @@ func TestMultiInboundDuplicateWindowIsReplaySafe(t *testing.T) {
 		t.Fatalf("expected exactly 1 ledger entry despite replay, got %d", len(repo.ledgers))
 	}
 }
+
+func TestMonthlyResetLateBucketDoesNotConsumeNewAllowance(t *testing.T) {
+	repo := newMemoryRepo()
+	id := "11111111-1111-1111-1111-111111111111"
+	cutoff := time.Date(2026, 11, 3, 12, 1, 0, 0, time.UTC)
+	end := time.Date(2026, 12, 1, 0, 0, 0, 0, time.UTC)
+	repo.quotas[id] = model.QuotaState{AccountUUID: id, RemainingIncludedQuota: 100, CurrentBalance: 5, PeriodStart: &cutoff, PeriodEnd: &end}
+	svc := New(baseConfig(), nil, repo)
+	snapshot := model.Snapshot{CollectedAt: cutoff.Add(-time.Second), NodeID: "node", Env: "prod"}
+	sample := model.Sample{UUID: id, UplinkBytesTotal: 20}
+	result := model.JobResult{}
+	if _, err := svc.processSample(context.Background(), snapshot, sample, &result); err != nil {
+		t.Fatal(err)
+	}
+	if q := repo.quotas[id]; q.RemainingIncludedQuota != 100 || q.CurrentBalance != 5 {
+		t.Fatalf("late traffic charged: %+v", q)
+	}
+	snapshot.CollectedAt = cutoff.Add(time.Minute)
+	sample.UplinkBytesTotal = 27
+	if _, err := svc.processSample(context.Background(), snapshot, sample, &result); err != nil {
+		t.Fatal(err)
+	}
+	if q := repo.quotas[id]; q.RemainingIncludedQuota != 93 {
+		t.Fatalf("new traffic not charged: %+v", q)
+	}
+	if len(repo.buckets) != 2 {
+		t.Fatal("raw traffic history removed")
+	}
+}
