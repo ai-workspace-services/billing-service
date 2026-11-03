@@ -10,7 +10,11 @@ import (
 )
 
 type Postgres struct {
-	db *sql.DB
+	db interface {
+		ExecContext(context.Context, string, ...any) (sql.Result, error)
+		QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+		QueryRowContext(context.Context, string, ...any) *sql.Row
+	}
 }
 
 func NewPostgres(db *sql.DB) *Postgres {
@@ -163,12 +167,24 @@ func (p *Postgres) ledgerExists(ctx context.Context, id string) (bool, error) {
 }
 
 func (p *Postgres) GetQuotaState(ctx context.Context, accountUUID string) (*model.QuotaState, error) {
+	// Expire only a recorded manual reset; preserve financial and suspension state.
+	if _, err := p.db.ExecContext(ctx, `UPDATE account_quota_states q SET
+ remaining_included_quota=GREATEST(0,p.included_quota_bytes-COALESCE((SELECT SUM(GREATEST(total_bytes,0)) FROM traffic_minute_buckets b WHERE b.account_uuid=q.account_uuid AND b.bucket_start >= date_trunc('month',now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'),0)),
+ period_start=date_trunc('month',now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC',
+ period_end=(date_trunc('month',now() AT TIME ZONE 'UTC')+interval '1 month') AT TIME ZONE 'UTC',effective_at=now(),updated_at=now()
+ FROM account_billing_profiles p WHERE q.account_uuid=$1 AND p.account_uuid=q.account_uuid
+ AND q.period_end<=now() AND EXISTS(SELECT 1 FROM audit_logs a WHERE a.action='admin.monthly_usage.reset' AND a.details->>'target_uuid'=$1
+ AND (CASE WHEN a.action='admin.monthly_usage.reset' THEN (a.details->'after'->>'period_start')::timestamptz END)=q.period_start
+ AND (CASE WHEN a.action='admin.monthly_usage.reset' THEN (a.details->'after'->>'period_end')::timestamptz END)=q.period_end)`, accountUUID); err != nil {
+		return nil, err
+	}
+
 	const query = `
-		SELECT account_uuid, remaining_included_quota, current_balance, arrears, arrears_since, throttle_state, suspend_state, last_rated_bucket_at, effective_at
+		SELECT account_uuid, remaining_included_quota, current_balance, arrears, arrears_since, throttle_state, suspend_state, last_rated_bucket_at, effective_at, period_start, period_end
 		FROM account_quota_states
 		WHERE account_uuid = $1`
 	var state model.QuotaState
-	var lastRated sql.NullTime
+	var lastRated, periodStart, periodEnd sql.NullTime
 	var arrearsSince sql.NullTime
 	err := p.db.QueryRowContext(ctx, query, accountUUID).Scan(
 		&state.AccountUUID,
@@ -179,13 +195,19 @@ func (p *Postgres) GetQuotaState(ctx context.Context, accountUUID string) (*mode
 		&state.ThrottleState,
 		&state.SuspendState,
 		&lastRated,
-		&state.EffectiveAt,
+		&state.EffectiveAt, &periodStart, &periodEnd,
 	)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil
 		}
 		return nil, err
+	}
+	if periodStart.Valid {
+		state.PeriodStart = &periodStart.Time
+	}
+	if periodEnd.Valid {
+		state.PeriodEnd = &periodEnd.Time
 	}
 	if lastRated.Valid {
 		value := lastRated.Time
@@ -425,4 +447,24 @@ func ensureUTC(ts time.Time) time.Time {
 
 func unexpectedStatus(name string) error {
 	return fmt.Errorf("unexpected status for %s", name)
+}
+
+// WithAccountTransaction serializes reset and rating for the same account.
+func (p *Postgres) WithAccountTransaction(ctx context.Context, id string, fn func(Repository) error) error {
+	db, ok := p.db.(*sql.DB)
+	if !ok {
+		return fn(p)
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err = tx.ExecContext(ctx, "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", id); err != nil {
+		return err
+	}
+	if err = fn(&Postgres{db: tx}); err != nil {
+		return err
+	}
+	return tx.Commit()
 }

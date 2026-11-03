@@ -326,6 +326,21 @@ func aggregateSamplesByUUID(samples []model.Sample, result *model.JobResult) []m
 }
 
 func (s *Service) processSample(ctx context.Context, snapshot model.Snapshot, sample model.Sample, result *model.JobResult) (bool, error) {
+	if transactional, ok := s.repo.(interface {
+		WithAccountTransaction(context.Context, string, func(repository.Repository) error) error
+	}); ok {
+		var processed bool
+		err := transactional.WithAccountTransaction(ctx, sample.UUID, func(repo repository.Repository) error {
+			scoped := &Service{cfg: s.cfg, source: s.source, repo: repo}
+			var err error
+			processed, err = scoped.processSampleLocked(ctx, snapshot, sample, result)
+			return err
+		})
+		return processed, err
+	}
+	return s.processSampleLocked(ctx, snapshot, sample, result)
+}
+func (s *Service) processSampleLocked(ctx context.Context, snapshot model.Snapshot, sample model.Sample, result *model.JobResult) (bool, error) {
 	storageNodeID := composeStorageNodeID(snapshot.Env, snapshot.NodeID)
 	minuteStart := snapshot.CollectedAt.UTC().Truncate(time.Minute)
 
@@ -415,8 +430,15 @@ func (s *Service) processSample(ctx context.Context, snapshot model.Snapshot, sa
 		}
 	}
 
-	includedApplied := minInt64(quota.RemainingIncludedQuota, totalBytes)
-	chargeableBytes := totalBytes - includedApplied
+	// Late buckets preceding a mid-month reset remain in raw history but
+	// cannot consume the new allowance or create a retrospective charge.
+	ratingBytes := totalBytes
+	if quota.PeriodStart != nil && minuteStart.Before(quota.PeriodStart.UTC()) {
+		ratingBytes = 0
+	}
+
+	includedApplied := minInt64(quota.RemainingIncludedQuota, ratingBytes)
+	chargeableBytes := ratingBytes - includedApplied
 	amountDelta := -float64(chargeableBytes) * effectivePricing.basePricePerByte * effectivePricing.multiplier
 	entry.RatedBytes = chargeableBytes
 	entry.AmountDelta = amountDelta
