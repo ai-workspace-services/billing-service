@@ -7,14 +7,14 @@
 
 ## 背景
 
-P1(accounts entitlement sync)落地后,`invoice.payment_failed` 只会置 `arrears=true`;规划决策 #3 要求 14 天不清欠 → suspend。时间驱动的升级归本仓(billing-service),断流执行归 accounts。
+P1(accounts entitlement sync)落地后,`invoice.payment_failed` 只会置 `arrears=true`;规划决策 #3 要求 3 天不清欠 → suspend。时间驱动的升级归本仓(billing-service),断流执行归 accounts。
 
 ## 实现内容(本仓)
 
 - **`arrears_since` 列**(`account_quota_states`):评率主循环余额转负时置位(同一欠费期不重复推进),恢复正数清零;schema 镜像文件 `sql/billing-service-schema.sql` 同步更新。accounts 侧持有正式迁移 `sql/20260712_arrears_since.sql` + 启动幂等 DDL
 - **`SuspendSyncer`**(`internal/service/suspend.go`):
   - `ARREARS_SWEEP_INTERVAL`(默认 1h)扫描 `ListArrearsAccounts()`(arrears=true 且未 suspended)
-  - `arrears_since` 距今超过 `ARREARS_SUSPEND_THRESHOLD`(默认 336h=14d)→ `suspend_state='suspended'`
+  - `arrears_since` 距今超过 `ARREARS_SUSPEND_THRESHOLD`(默认 72h=3d)→ `suspend_state='suspended'`
   - 无 `arrears_since` 的存量行不猜测、不升级
 - **恢复**:不归本仓 —— accounts 在 invoice.paid / 手动清欠时置回 `active`(字段所有权:suspended 置位归本仓,active 恢复归 accounts)
 - **测试**:sweep 升级/宽限期内不动/存量行豁免/已 suspended 与已清欠跳过;`go test ./...` 全过
@@ -23,7 +23,7 @@ P1(accounts entitlement sync)落地后,`invoice.payment_failed` 只会置 `arrea
 
 | 环境变量 | 默认 | 说明 |
 |---|---|---|
-| `ARREARS_SUSPEND_THRESHOLD` | `336h`(14d) | 欠费持续多久升级为 suspended(Go duration 格式) |
+| `ARREARS_SUSPEND_THRESHOLD` | `72h`(3d) | 欠费持续多久升级为 suspended(Go duration 格式) |
 | `ARREARS_SWEEP_INTERVAL` | `1h` | 扫描周期 |
 
 ## 遗留待办

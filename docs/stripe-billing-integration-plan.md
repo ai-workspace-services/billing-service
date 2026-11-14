@@ -71,7 +71,7 @@
 
 即便 P1 做完 entitlement sync,欠费用户也只会被标 `throttled`,**没有组件把它落到 xray 层**。补齐方案(纳入分期):
 
-- **P1.5(推荐,轻量)**:`listAgentUsers` / `internalNetworkIdentities` 过滤时 join `account_quota_states`,排除 `suspend_state='suspended'` 的账号 —— 复用现成 agent sync 通道,分钟级断流,无新组件;同时 billing-service 补状态迁移:arrears 持续 N 天 → `suspend_state='suspended'`(阈值按 §5 决策 14 天)。
+- **P1.5(推荐,轻量)**:`listAgentUsers` / `internalNetworkIdentities` 过滤时 join `account_quota_states`,排除 `suspend_state='suspended'` 的账号 —— 复用现成 agent sync 通道,分钟级断流,无新组件;同时 billing-service 补状态迁移:arrears 持续 N 天 → `suspend_state='suspended'`(阈值按 §5 决策 3 天)。
 - **限速(throttle)**:xray 无原生 per-user 限速,真限速要么换低速 inbound 方案要么上层网关,复杂度高 → **P3+ 或降级为"仅 suspend 不 throttle"**,throttled 状态仅作预警(console 提示 + 邮件催缴)。
 - **策略通道**:保留为 P3+ 的演进方向(节点级细粒度策略),当前不投入。
 
@@ -203,7 +203,7 @@ CREATE TABLE billing_plans (
 
 > ✅ **已上线** — accounts #30(agent sync 断流 + 人工清欠 admin 端点)+ 本仓 #11(`SuspendSyncer` 宽限扫描)。
 > ⚠️ 最后一项 console 提示与催缴邮件**未实现**;throttle 因 xray 不支持 per-user 限速,降级为纯状态标记。
-- [x] billing-service:arrears 持续超阈值(14 天,配置化)→ `suspend_state='suspended'` 状态迁移
+- [x] billing-service:arrears 持续超阈值(3 天,配置化)→ `suspend_state='suspended'` 状态迁移
 - [x] accounts:`listAgentUsers` + `internalNetworkIdentities` 排除 `suspend_state='suspended'` 账号(join quota_states)→ agent 下次 sync 即断流
 - [x] 恢复路径:invoice.paid / 手动清欠 → `suspend_state='active'` → 下次 sync 恢复接入
 - [ ] console:arrears/throttled 状态提示 + 催缴邮件(SMTP 已有)
@@ -255,7 +255,7 @@ CREATE TABLE billing_plans (
 |---|---|---|
 | 1 | entitlement sync 放哪 | ✅ **accounts 内联**(webhook 驱动,事件零滞后;billing-service 不碰 Stripe) |
 | 2 | 套餐结构 | ✅ **走 admin 运营后台配置**(`billing_plans` 表 + admin CRUD 面),运营自助改,不阻塞开发 |
-| 3 | 欠费降级梯度 | ✅ 1 次 failed=`arrears`,3 次或 7 天=`throttle`,14 天=`suspend`(进配置) |
+| 3 | 欠费降级梯度 | ✅ 1 次 failed=`arrears`,3 天宽限期后=`suspend`(进配置) |
 | 4 | paygo 充值 | ✅ **推迟到 P2+**;`kind=paygo_topup` 表结构 P1 预留 |
 
 P1/P2 范围按 §4 原样执行。

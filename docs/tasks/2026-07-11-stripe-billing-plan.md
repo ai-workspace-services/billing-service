@@ -12,7 +12,7 @@
 
 **目标**:Stripe 订阅收款 ↔ accounts 订阅记录 ↔ billing-service 计量/配额,三方连成可运营闭环,且价格/套餐/权益**数据驱动**(改表不改代码、不重部署)。
 
-**现在能跑通什么**:用户在 console 下单 → Stripe checkout → webhook 回调 accounts → 按 `billing_plans` 目录写权益档案并重置配额 → xray 流量经 xray-exporter 计量 → billing-service 评率扣配额 → 欠费满 14 天自动 suspend → accounts 的 agent sync 把该用户从 xray 配置摘掉(真断流)→ 付清/人工清欠后恢复。**收入→权益→用量→欠费执行**这条主链路已完整闭合。
+**现在能跑通什么**:用户在 console 下单 → Stripe checkout → webhook 回调 accounts → 按 `billing_plans` 目录写权益档案并重置配额 → xray 流量经 xray-exporter 计量 → billing-service 评率扣配额 → 欠费满 3 天自动 suspend → accounts 的 agent sync 把该用户从 xray 配置摘掉(真断流)→ 付清/人工清欠后恢复。**收入→权益→用量→欠费执行**这条主链路已完整闭合。
 
 **还差什么**(按建议优先级):
 
@@ -31,7 +31,7 @@
 |---|---|---|---|
 | **P0** | prod Stripe 密钥接线(Vault→CI→app.env) | ✅ **已上线**(sandbox) | accounts [#18](https://github.com/ai-workspace-services/accounts/pull/18) [#20](https://github.com/ai-workspace-services/accounts/pull/20) [#22](https://github.com/ai-workspace-services/accounts/pull/22);playbooks [#121](https://github.com/ai-workspace-infra/playbooks/pull/121) |
 | **P1** | `billing_plans` 目录 + `stripe_webhook_events` 审计去重 + entitlement sync | ✅ **已上线** | accounts [#19](https://github.com/ai-workspace-services/accounts/pull/19) |
-| **P1.5** | 欠费 14 天 → suspended + agent sync 断流 + 人工清欠恢复 | ✅ **已上线** | accounts [#30](https://github.com/ai-workspace-services/accounts/pull/30);本仓 [#11](https://github.com/ai-workspace-services/billing-service/pull/11) |
+| **P1.5** | 欠费 3 天 → suspended + agent sync 断流 + 人工清欠恢复 | ✅ **已上线** | accounts [#30](https://github.com/ai-workspace-services/accounts/pull/30);本仓 [#11](https://github.com/ai-workspace-services/billing-service/pull/11) |
 | **F0** | 多云成本 SDK 集成(AWS CostExplorer / GCP BigQuery / Azure Consumption) | ✅ **代码已合并**(凭据接线待核实,见 §四.3) | 本仓 [#6](https://github.com/ai-workspace-services/billing-service/pull/6) [#8](https://github.com/ai-workspace-services/billing-service/pull/8) |
 | **P2** | 7天低用量退款 + 升降级 proration + console 定价页 + 注销联动 | ⬜ **未开工** | — |
 | **P3** | reconcile-stripe 对账 job + `GET /v1/usage/window` + 指标 | ⬜ **未开工** | — |
@@ -163,7 +163,7 @@ accounts 的 CI 已改为 `main→uat`、`release/**` 或 `v*` tag→prod(accoun
 
 1. entitlement sync **放 accounts 内联**(webhook 驱动,零滞后;billing-service 不碰 Stripe)
 2. 套餐目录 **走 admin 运营后台配置**(`billing_plans` 表 + admin CRUD)
-3. 欠费降级梯度:1 次 failed=`arrears`,3 次或 7 天=`throttle`,14 天=`suspend`
+3. 欠费降级梯度:1 次 failed=`arrears`,3 天宽限期后=`suspend`
    *(实际:throttle 无执行手段,降级为预警;见 §四.5)*
 4. paygo 充值 **推迟 P2+**,`kind=paygo_topup` 表结构 P1 预留
 
