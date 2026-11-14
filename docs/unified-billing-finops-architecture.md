@@ -70,7 +70,7 @@
 | **账单** | 发票、支付历史、下期扣款额 | Stripe Portal(`POST /api/auth/stripe/portal`)+ invoice 历史(P3 端点) | ✅/🟡 |
 | **变更** | 升/降级(proration:升级即时、降级期末) | `POST /api/auth/subscriptions/change` | 🔴 P2 |
 | **退订/退款** | 期末取消;首订 7 天用量 <5% 全额退 | cancel ✅;refund(用量判定查计费域分钟桶) | ✅/🔴 P2 |
-| **异常体验** | 欠费:先标记→提醒→限流→14 天断流;恢复付款即自动复通 | arrears 链(P1)+ P1.5 执行面 + 催缴邮件 | 🟡 |
+| **异常体验** | 欠费:先标记→提醒→限流→3 天断流;恢复付款即自动复通 | arrears 链(P1)+ P1.5 执行面 + 催缴邮件 | 🟡 |
 | **知情权** | 配额将尽/已停/欠费的主动通知 | PGMQ billing_events → 通知消费者(邮件/console 提示) | 🔴 P2 |
 
 ### 3.2 消费者视角的对账恒等式
@@ -120,7 +120,7 @@ Price Book + 云账单给出真实单位成本,运营在 admin 后台改 `billin
 
 **③ 催缴闭环(账单→执行)**
 ```
-payment_failed → arrears(P1 ✅)→ 3次/7天 throttle 预警 → 14天 suspend
+payment_failed → arrears(P1 ✅)→ 3天宽限期后 suspend
 → agent sync 断流(P1.5)→ invoice.paid → 自动复通
 PGMQ billing_events 驱动通知与升级,全程留审计
 ```

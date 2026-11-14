@@ -47,6 +47,8 @@
 | `PricePerByte` | `float64` | 默认每字节价格 |
 | `InitialIncludedQuotaBytes` | `int64` | 默认初始包含流量 |
 | `InitialBalance` | `float64` | 默认初始余额 |
+| `ArrearsSuspendThreshold` | `time.Duration` | 欠费宽限期阈值，默认 `72h`（3 天） |
+| `ArrearsSweepInterval` | `time.Duration` | 欠费停用扫描周期，默认 `1h` |
 
 ### `rawExporterSource`
 
@@ -81,6 +83,8 @@
 | `PRICE_PER_BYTE` | 否 | `0` | 默认单价 |
 | `INITIAL_INCLUDED_QUOTA_BYTES` | 否 | `0` | 默认初始包含流量 |
 | `INITIAL_BALANCE` | 否 | `0` | 默认初始余额 |
+| `ARREARS_SUSPEND_THRESHOLD` | 否 | `72h` | 欠费宽限期阈值（3 天） |
+| `ARREARS_SWEEP_INTERVAL` | 否 | `1h` | 欠费停用扫描周期 |
 
 ## 函数
 

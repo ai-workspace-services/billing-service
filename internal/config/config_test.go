@@ -3,6 +3,7 @@ package config
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestLoadExporterSourcesFromJSON(t *testing.T) {
@@ -164,5 +165,41 @@ func TestParseImageRefWithDigest(t *testing.T) {
 		if tag != "" || commit != "" || version != "" {
 			t.Fatalf("digest-only image invented tag or source identity: %q %q %q", tag, commit, version)
 		}
+	}
+}
+
+func TestArrearsSuspendThresholdDefaultsToThreeDays(t *testing.T) {
+	t.Setenv("APP_ENV", "test")
+	t.Setenv("DATABASE_URL", "postgres://example")
+	t.Setenv("INTERNAL_SERVICE_TOKEN", "token")
+	t.Setenv("BILLING_INGEST_MODE", "push")
+	t.Setenv("EXPORTER_BASE_URL", "")
+	t.Setenv("EXPORTER_SOURCES_JSON", "")
+	t.Setenv("ARREARS_SUSPEND_THRESHOLD", "")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if got, want := cfg.ArrearsSuspendThreshold, 3*24*time.Hour; got != want {
+		t.Fatalf("ArrearsSuspendThreshold = %v, want %v", got, want)
+	}
+}
+
+func TestArrearsSuspendThresholdOverride(t *testing.T) {
+	t.Setenv("APP_ENV", "test")
+	t.Setenv("DATABASE_URL", "postgres://example")
+	t.Setenv("INTERNAL_SERVICE_TOKEN", "token")
+	t.Setenv("BILLING_INGEST_MODE", "push")
+	t.Setenv("EXPORTER_BASE_URL", "")
+	t.Setenv("EXPORTER_SOURCES_JSON", "")
+	t.Setenv("ARREARS_SUSPEND_THRESHOLD", "48h")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if got, want := cfg.ArrearsSuspendThreshold, 48*time.Hour; got != want {
+		t.Fatalf("ArrearsSuspendThreshold = %v, want %v", got, want)
 	}
 }

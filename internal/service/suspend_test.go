@@ -12,7 +12,7 @@ import (
 func TestSuspendSweepEscalatesProlongedArrears(t *testing.T) {
 	repo := newMemoryRepo()
 	now := time.Now().UTC()
-	overdue := now.Add(-15 * 24 * time.Hour)
+	overdue := now.Add(-4 * 24 * time.Hour)
 	repo.quotas["overdue"] = model.QuotaState{
 		AccountUUID:   "overdue",
 		Arrears:       true,
@@ -21,7 +21,7 @@ func TestSuspendSweepEscalatesProlongedArrears(t *testing.T) {
 		SuspendState:  "active",
 	}
 
-	syncer := NewSuspendSyncer(repo, 14*24*time.Hour, time.Hour, slog.Default())
+	syncer := NewSuspendSyncer(repo, 3*24*time.Hour, time.Hour, slog.Default())
 	syncer.sweep(context.Background())
 
 	if got := repo.quotas["overdue"].SuspendState; got != "suspended" {
@@ -32,7 +32,7 @@ func TestSuspendSweepEscalatesProlongedArrears(t *testing.T) {
 func TestSuspendSweepLeavesRecentArrearsAlone(t *testing.T) {
 	repo := newMemoryRepo()
 	now := time.Now().UTC()
-	recent := now.Add(-3 * 24 * time.Hour)
+	recent := now.Add(-2 * 24 * time.Hour)
 	repo.quotas["recent"] = model.QuotaState{
 		AccountUUID:   "recent",
 		Arrears:       true,
@@ -41,7 +41,7 @@ func TestSuspendSweepLeavesRecentArrearsAlone(t *testing.T) {
 		SuspendState:  "active",
 	}
 
-	syncer := NewSuspendSyncer(repo, 14*24*time.Hour, time.Hour, slog.Default())
+	syncer := NewSuspendSyncer(repo, 3*24*time.Hour, time.Hour, slog.Default())
 	syncer.sweep(context.Background())
 
 	if got := repo.quotas["recent"].SuspendState; got != "active" {
@@ -60,7 +60,7 @@ func TestSuspendSweepIgnoresArrearsWithoutEpisodeStart(t *testing.T) {
 		SuspendState:  "active",
 	}
 
-	syncer := NewSuspendSyncer(repo, 14*24*time.Hour, time.Hour, slog.Default())
+	syncer := NewSuspendSyncer(repo, 3*24*time.Hour, time.Hour, slog.Default())
 	syncer.sweep(context.Background())
 
 	if got := repo.quotas["legacy"].SuspendState; got != "active" {
@@ -84,7 +84,7 @@ func TestSuspendSweepSkipsClearedAndAlreadySuspended(t *testing.T) {
 		SuspendState: "suspended",
 	}
 
-	syncer := NewSuspendSyncer(repo, 14*24*time.Hour, time.Hour, slog.Default())
+	syncer := NewSuspendSyncer(repo, 3*24*time.Hour, time.Hour, slog.Default())
 	syncer.sweep(context.Background())
 
 	if got := repo.quotas["paid-up"].SuspendState; got != "active" {

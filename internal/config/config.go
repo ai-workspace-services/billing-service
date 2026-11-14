@@ -229,7 +229,7 @@ func Load() (Config, error) {
 
 	arrearsSuspendThreshold := strings.TrimSpace(os.Getenv("ARREARS_SUSPEND_THRESHOLD"))
 	if arrearsSuspendThreshold == "" {
-		cfg.ArrearsSuspendThreshold = 14 * 24 * time.Hour
+		cfg.ArrearsSuspendThreshold = 3 * 24 * time.Hour
 	} else {
 		parsed, err := time.ParseDuration(arrearsSuspendThreshold)
 		if err != nil {
