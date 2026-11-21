@@ -9,7 +9,7 @@
     "cloud_vendor_costs"
   ],
   "reference_file": "sql/billing-service-schema.sql",
-  "reference_sha256": "7faf46295b419102e4bbcb8cef67db14ba3beef1d46ee945fd4acfb86541c39b",
+  "reference_sha256": "b9006b808ea459738484f73a9db47d4c2c40723598491f309a5790413046c5c5",
   "no_business_seeds": true,
   "database_cutover_approved": false
 }

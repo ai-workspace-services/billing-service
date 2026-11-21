@@ -21,3 +21,10 @@ type Repository interface {
 	UpsertSourceSyncState(ctx context.Context, state model.SourceSyncState) error
 	UpsertCloudVendorCost(ctx context.Context, cost model.CloudVendorCost) error
 }
+
+// NodePoolMetadataReader optionally resolves node routing metadata from the
+// shared control-plane tables (public.agents and public.node_health_snapshots).
+// Keeping this separate from Repository keeps existing test mocks compatible.
+type NodePoolMetadataReader interface {
+	GetNodePoolMetadata(ctx context.Context, nodeID string) (*model.NodePoolMetadata, error)
+}

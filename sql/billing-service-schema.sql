@@ -23,6 +23,7 @@ CREATE TABLE IF NOT EXISTS public.traffic_minute_buckets (
   account_uuid UUID NOT NULL REFERENCES public.users(uuid) ON DELETE CASCADE,
   region TEXT NOT NULL DEFAULT '',
   line_code TEXT NOT NULL DEFAULT '',
+  routing_pool TEXT NOT NULL DEFAULT '',
   uplink_bytes BIGINT NOT NULL DEFAULT 0,
   downlink_bytes BIGINT NOT NULL DEFAULT 0,
   total_bytes BIGINT NOT NULL DEFAULT 0,
@@ -50,6 +51,7 @@ CREATE TABLE IF NOT EXISTS public.billing_ledger (
 CREATE TABLE IF NOT EXISTS public.account_quota_states (
   account_uuid UUID PRIMARY KEY REFERENCES public.users(uuid) ON DELETE CASCADE,
   remaining_included_quota BIGINT NOT NULL DEFAULT 0,
+  remaining_high_speed_quota BIGINT NOT NULL DEFAULT 0,
   current_balance DOUBLE PRECISION NOT NULL DEFAULT 0,
   arrears BOOLEAN NOT NULL DEFAULT false,
   -- P1.5: start of the current arrears episode; cleared when arrears clears.
@@ -66,6 +68,7 @@ CREATE TABLE IF NOT EXISTS public.account_billing_profiles (
   account_uuid UUID PRIMARY KEY REFERENCES public.users(uuid) ON DELETE CASCADE,
   package_name TEXT NOT NULL DEFAULT 'default',
   included_quota_bytes BIGINT NOT NULL DEFAULT 0,
+  high_speed_quota_bytes BIGINT NOT NULL DEFAULT 0,
   base_price_per_byte DOUBLE PRECISION NOT NULL DEFAULT 0,
   region_multiplier DOUBLE PRECISION NOT NULL DEFAULT 1.0,
   line_multiplier DOUBLE PRECISION NOT NULL DEFAULT 1.0,

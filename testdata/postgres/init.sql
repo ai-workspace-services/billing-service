@@ -35,6 +35,7 @@ CREATE TABLE IF NOT EXISTS public.traffic_minute_buckets (
   account_uuid UUID NOT NULL REFERENCES public.users(uuid) ON DELETE CASCADE,
   region TEXT NOT NULL DEFAULT '',
   line_code TEXT NOT NULL DEFAULT '',
+  routing_pool TEXT NOT NULL DEFAULT '',
   uplink_bytes BIGINT NOT NULL DEFAULT 0,
   downlink_bytes BIGINT NOT NULL DEFAULT 0,
   total_bytes BIGINT NOT NULL DEFAULT 0,
@@ -62,8 +63,10 @@ CREATE TABLE IF NOT EXISTS public.billing_ledger (
 CREATE TABLE IF NOT EXISTS public.account_quota_states (
   account_uuid UUID PRIMARY KEY REFERENCES public.users(uuid) ON DELETE CASCADE,
   remaining_included_quota BIGINT NOT NULL DEFAULT 0,
+  remaining_high_speed_quota BIGINT NOT NULL DEFAULT 0,
   current_balance DOUBLE PRECISION NOT NULL DEFAULT 0,
   arrears BOOLEAN NOT NULL DEFAULT false,
+  arrears_since TIMESTAMPTZ NULL,
   throttle_state TEXT NOT NULL DEFAULT 'normal',
   suspend_state TEXT NOT NULL DEFAULT 'active',
   last_rated_bucket_at TIMESTAMPTZ NULL,
@@ -75,12 +78,42 @@ CREATE TABLE IF NOT EXISTS public.account_billing_profiles (
   account_uuid UUID PRIMARY KEY REFERENCES public.users(uuid) ON DELETE CASCADE,
   package_name TEXT NOT NULL DEFAULT 'default',
   included_quota_bytes BIGINT NOT NULL DEFAULT 0,
+  high_speed_quota_bytes BIGINT NOT NULL DEFAULT 0,
   base_price_per_byte DOUBLE PRECISION NOT NULL DEFAULT 0,
   region_multiplier DOUBLE PRECISION NOT NULL DEFAULT 1.0,
   line_multiplier DOUBLE PRECISION NOT NULL DEFAULT 1.0,
   peak_multiplier DOUBLE PRECISION NOT NULL DEFAULT 1.0,
   offpeak_multiplier DOUBLE PRECISION NOT NULL DEFAULT 1.0,
   pricing_rule_version TEXT NOT NULL DEFAULT 'pricing-default-v1',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS public.agents (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL DEFAULT '',
+  groups JSONB NOT NULL DEFAULT '[]'::jsonb,
+  healthy BOOLEAN NOT NULL DEFAULT false,
+  last_heartbeat TIMESTAMPTZ NULL,
+  clients_count INTEGER NOT NULL DEFAULT 0,
+  sync_revision TEXT NOT NULL DEFAULT '',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS public.node_health_snapshots (
+  node_id TEXT PRIMARY KEY,
+  region TEXT NOT NULL DEFAULT '',
+  line_code TEXT NOT NULL DEFAULT '',
+  pricing_group TEXT NOT NULL DEFAULT '',
+  stats_enabled BOOLEAN NOT NULL DEFAULT false,
+  xray_revision TEXT NOT NULL DEFAULT '',
+  healthy BOOLEAN NOT NULL DEFAULT false,
+  latency_ms INTEGER NOT NULL DEFAULT 0,
+  error_rate DOUBLE PRECISION NOT NULL DEFAULT 0,
+  active_connections INTEGER NOT NULL DEFAULT 0,
+  health_score DOUBLE PRECISION NOT NULL DEFAULT 0,
+  sampled_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );

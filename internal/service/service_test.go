@@ -45,22 +45,26 @@ func (f *fakeWindowSource) FetchWindow(_ context.Context, source config.Exporter
 }
 
 type memoryRepo struct {
-	checkpoints map[string]model.Checkpoint
-	buckets     map[string]model.MinuteBucket
-	ledgers     map[string]model.LedgerEntry
-	quotas      map[string]model.QuotaState
-	profiles    map[string]model.BillingProfile
-	sourceSync  map[string]model.SourceSyncState
+	checkpoints     map[string]model.Checkpoint
+	buckets         map[string]model.MinuteBucket
+	ledgers         map[string]model.LedgerEntry
+	quotas          map[string]model.QuotaState
+	profiles        map[string]model.BillingProfile
+	sourceSync      map[string]model.SourceSyncState
+	nodeMetadata    map[string]model.NodePoolMetadata
+	nodeLookupCalls map[string]int
 }
 
 func newMemoryRepo() *memoryRepo {
 	return &memoryRepo{
-		checkpoints: map[string]model.Checkpoint{},
-		buckets:     map[string]model.MinuteBucket{},
-		ledgers:     map[string]model.LedgerEntry{},
-		quotas:      map[string]model.QuotaState{},
-		profiles:    map[string]model.BillingProfile{},
-		sourceSync:  map[string]model.SourceSyncState{},
+		checkpoints:     map[string]model.Checkpoint{},
+		buckets:         map[string]model.MinuteBucket{},
+		ledgers:         map[string]model.LedgerEntry{},
+		quotas:          map[string]model.QuotaState{},
+		profiles:        map[string]model.BillingProfile{},
+		sourceSync:      map[string]model.SourceSyncState{},
+		nodeMetadata:    map[string]model.NodePoolMetadata{},
+		nodeLookupCalls: map[string]int{},
 	}
 }
 
@@ -155,7 +159,22 @@ func (m *memoryRepo) UpsertCloudVendorCost(ctx context.Context, cost model.Cloud
 	return nil
 }
 
-var _ repository.Repository = (*memoryRepo)(nil)
+func (m *memoryRepo) GetNodePoolMetadata(_ context.Context, nodeID string) (*model.NodePoolMetadata, error) {
+	if m.nodeLookupCalls != nil {
+		m.nodeLookupCalls[nodeID]++
+	}
+	if meta, ok := m.nodeMetadata[nodeID]; ok {
+		copied := meta
+		copied.Groups = append([]string(nil), meta.Groups...)
+		return &copied, nil
+	}
+	return nil, nil
+}
+
+var (
+	_ repository.Repository             = (*memoryRepo)(nil)
+	_ repository.NodePoolMetadataReader = (*memoryRepo)(nil)
+)
 
 func baseConfig() config.Config {
 	return config.Config{

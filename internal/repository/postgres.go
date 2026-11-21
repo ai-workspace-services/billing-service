@@ -3,6 +3,7 @@ package repository
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -77,9 +78,10 @@ func (p *Postgres) UpsertMinuteBucket(ctx context.Context, bucket model.MinuteBu
 
 	const query = `
 		INSERT INTO traffic_minute_buckets (
-			bucket_start, node_id, account_uuid, region, line_code, uplink_bytes, downlink_bytes, total_bytes, multiplier, rating_status, source_revision
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+			bucket_start, node_id, account_uuid, region, line_code, routing_pool, uplink_bytes, downlink_bytes, total_bytes, multiplier, rating_status, source_revision
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 		ON CONFLICT (bucket_start, node_id, account_uuid, region, line_code) DO UPDATE SET
+			routing_pool = EXCLUDED.routing_pool,
 			uplink_bytes = EXCLUDED.uplink_bytes,
 			downlink_bytes = EXCLUDED.downlink_bytes,
 			total_bytes = EXCLUDED.total_bytes,
@@ -93,6 +95,7 @@ func (p *Postgres) UpsertMinuteBucket(ctx context.Context, bucket model.MinuteBu
 		bucket.AccountUUID,
 		bucket.Region,
 		bucket.LineCode,
+		bucket.RoutingPool,
 		bucket.UplinkBytes,
 		bucket.DownlinkBytes,
 		bucket.TotalBytes,
@@ -169,7 +172,8 @@ func (p *Postgres) ledgerExists(ctx context.Context, id string) (bool, error) {
 func (p *Postgres) GetQuotaState(ctx context.Context, accountUUID string) (*model.QuotaState, error) {
 	// Expire only a recorded manual reset; preserve financial and suspension state.
 	if _, err := p.db.ExecContext(ctx, `UPDATE account_quota_states q SET
- remaining_included_quota=GREATEST(0,p.included_quota_bytes-COALESCE((SELECT SUM(GREATEST(total_bytes,0)) FROM traffic_minute_buckets b WHERE b.account_uuid=q.account_uuid AND b.bucket_start >= date_trunc('month',now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'),0)),
+ remaining_included_quota=GREATEST(0,p.included_quota_bytes-COALESCE((SELECT SUM(GREATEST(total_bytes,0)) FROM traffic_minute_buckets b WHERE b.account_uuid=q.account_uuid AND b.routing_pool <> 'Pro-EC2-Pool' AND b.rating_status <> 'exempt' AND b.bucket_start >= date_trunc('month',now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'),0)),
+ remaining_high_speed_quota=GREATEST(0,p.high_speed_quota_bytes-COALESCE((SELECT SUM(GREATEST(total_bytes,0)) FROM traffic_minute_buckets b WHERE b.account_uuid=q.account_uuid AND b.routing_pool = 'Pro-EC2-Pool' AND b.bucket_start >= date_trunc('month',now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'),0)),
  period_start=date_trunc('month',now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC',
  period_end=(date_trunc('month',now() AT TIME ZONE 'UTC')+interval '1 month') AT TIME ZONE 'UTC',effective_at=now(),updated_at=now()
  FROM account_billing_profiles p WHERE q.account_uuid=$1 AND p.account_uuid=q.account_uuid
@@ -180,7 +184,7 @@ func (p *Postgres) GetQuotaState(ctx context.Context, accountUUID string) (*mode
 	}
 
 	const query = `
-		SELECT account_uuid, remaining_included_quota, current_balance, arrears, arrears_since, throttle_state, suspend_state, last_rated_bucket_at, effective_at, period_start, period_end
+		SELECT account_uuid, remaining_included_quota, remaining_high_speed_quota, current_balance, arrears, arrears_since, throttle_state, suspend_state, last_rated_bucket_at, effective_at, period_start, period_end
 		FROM account_quota_states
 		WHERE account_uuid = $1`
 	var state model.QuotaState
@@ -189,6 +193,7 @@ func (p *Postgres) GetQuotaState(ctx context.Context, accountUUID string) (*mode
 	err := p.db.QueryRowContext(ctx, query, accountUUID).Scan(
 		&state.AccountUUID,
 		&state.RemainingIncludedQuota,
+		&state.RemainingHighSpeedQuota,
 		&state.CurrentBalance,
 		&state.Arrears,
 		&arrearsSince,
@@ -223,10 +228,11 @@ func (p *Postgres) GetQuotaState(ctx context.Context, accountUUID string) (*mode
 func (p *Postgres) UpsertQuotaState(ctx context.Context, state model.QuotaState) error {
 	const query = `
 		INSERT INTO account_quota_states (
-			account_uuid, remaining_included_quota, current_balance, arrears, arrears_since, throttle_state, suspend_state, last_rated_bucket_at, effective_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+			account_uuid, remaining_included_quota, remaining_high_speed_quota, current_balance, arrears, arrears_since, throttle_state, suspend_state, last_rated_bucket_at, effective_at
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 		ON CONFLICT (account_uuid) DO UPDATE SET
 			remaining_included_quota = EXCLUDED.remaining_included_quota,
+			remaining_high_speed_quota = EXCLUDED.remaining_high_speed_quota,
 			current_balance = EXCLUDED.current_balance,
 			arrears = EXCLUDED.arrears,
 			arrears_since = EXCLUDED.arrears_since,
@@ -247,6 +253,7 @@ func (p *Postgres) UpsertQuotaState(ctx context.Context, state model.QuotaState)
 	_, err := p.db.ExecContext(ctx, query,
 		state.AccountUUID,
 		state.RemainingIncludedQuota,
+		state.RemainingHighSpeedQuota,
 		state.CurrentBalance,
 		state.Arrears,
 		arrearsSince,
@@ -263,7 +270,7 @@ func (p *Postgres) UpsertQuotaState(ctx context.Context, state model.QuotaState)
 // evaluate against the configured grace threshold.
 func (p *Postgres) ListArrearsAccounts(ctx context.Context) ([]model.QuotaState, error) {
 	const query = `
-		SELECT account_uuid, remaining_included_quota, current_balance, arrears, arrears_since, throttle_state, suspend_state, last_rated_bucket_at, effective_at
+		SELECT account_uuid, remaining_included_quota, remaining_high_speed_quota, current_balance, arrears, arrears_since, throttle_state, suspend_state, last_rated_bucket_at, effective_at
 		FROM account_quota_states
 		WHERE arrears = true AND suspend_state <> 'suspended'`
 	rows, err := p.db.QueryContext(ctx, query)
@@ -280,6 +287,7 @@ func (p *Postgres) ListArrearsAccounts(ctx context.Context) ([]model.QuotaState,
 		if err := rows.Scan(
 			&state.AccountUUID,
 			&state.RemainingIncludedQuota,
+			&state.RemainingHighSpeedQuota,
 			&state.CurrentBalance,
 			&state.Arrears,
 			&arrearsSince,
@@ -305,7 +313,7 @@ func (p *Postgres) ListArrearsAccounts(ctx context.Context) ([]model.QuotaState,
 
 func (p *Postgres) GetBillingProfile(ctx context.Context, accountUUID string) (*model.BillingProfile, error) {
 	const query = `
-		SELECT account_uuid, package_name, included_quota_bytes, base_price_per_byte, region_multiplier, line_multiplier, peak_multiplier, offpeak_multiplier, pricing_rule_version
+		SELECT account_uuid, package_name, included_quota_bytes, high_speed_quota_bytes, base_price_per_byte, region_multiplier, line_multiplier, peak_multiplier, offpeak_multiplier, pricing_rule_version
 		FROM account_billing_profiles
 		WHERE account_uuid = $1`
 	var profile model.BillingProfile
@@ -313,6 +321,7 @@ func (p *Postgres) GetBillingProfile(ctx context.Context, accountUUID string) (*
 		&profile.AccountUUID,
 		&profile.PackageName,
 		&profile.IncludedQuotaBytes,
+		&profile.HighSpeedQuotaBytes,
 		&profile.BasePricePerByte,
 		&profile.RegionMultiplier,
 		&profile.LineMultiplier,
@@ -327,6 +336,37 @@ func (p *Postgres) GetBillingProfile(ctx context.Context, accountUUID string) (*
 		return nil, err
 	}
 	return &profile, nil
+}
+
+func (p *Postgres) GetNodePoolMetadata(ctx context.Context, nodeID string) (*model.NodePoolMetadata, error) {
+	const query = `
+		SELECT
+			(a.id IS NOT NULL OR n.node_id IS NOT NULL) AS found,
+			COALESCE(a.groups, '[]'::jsonb),
+			COALESCE(n.pricing_group, '')
+		FROM (SELECT $1::text AS id) req
+		LEFT JOIN public.agents a ON a.id = req.id
+		LEFT JOIN public.node_health_snapshots n ON n.node_id = req.id`
+	var found bool
+	var groupsJSON []byte
+	var pricingGroup string
+	if err := p.db.QueryRowContext(ctx, query, nodeID).Scan(&found, &groupsJSON, &pricingGroup); err != nil {
+		return nil, err
+	}
+	if !found {
+		return nil, nil
+	}
+	var groups []string
+	if len(groupsJSON) > 0 {
+		if err := json.Unmarshal(groupsJSON, &groups); err != nil {
+			return nil, fmt.Errorf("unmarshal agent groups for %s: %w", nodeID, err)
+		}
+	}
+	return &model.NodePoolMetadata{
+		NodeID:       nodeID,
+		Groups:       groups,
+		PricingGroup: pricingGroup,
+	}, nil
 }
 
 func (p *Postgres) GetSourceSyncState(ctx context.Context, sourceID string) (*model.SourceSyncState, error) {
@@ -439,7 +479,10 @@ func (p *Postgres) UpsertCloudVendorCost(ctx context.Context, cost model.CloudVe
 	return err
 }
 
-var _ Repository = (*Postgres)(nil)
+var (
+	_ Repository             = (*Postgres)(nil)
+	_ NodePoolMetadataReader = (*Postgres)(nil)
+)
 
 func ensureUTC(ts time.Time) time.Time {
 	return ts.UTC()
