@@ -72,6 +72,7 @@ type Config struct {
 
 	ArrearsSuspendThreshold time.Duration
 	ArrearsSweepInterval    time.Duration
+	DualBucketQuotaEnforce  bool
 }
 
 // RuntimeImageMetadata uses the same IMAGE-derived fields as Service.Ping.
@@ -226,6 +227,7 @@ func Load() (Config, error) {
 	cfg.PricePerByte = parseFloatEnv("PRICE_PER_BYTE", 0)
 	cfg.InitialBalance = parseFloatEnv("INITIAL_BALANCE", 0)
 	cfg.InitialIncludedQuotaBytes = parseIntEnv("INITIAL_INCLUDED_QUOTA_BYTES", 0)
+	cfg.DualBucketQuotaEnforce = parseBoolEnv("DUAL_BUCKET_QUOTA_ENFORCE", false)
 
 	arrearsSuspendThreshold := strings.TrimSpace(os.Getenv("ARREARS_SUSPEND_THRESHOLD"))
 	if arrearsSuspendThreshold == "" {
@@ -344,6 +346,18 @@ func parseIntEnv(key string, fallback int64) int64 {
 		return fallback
 	}
 	parsed, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil {
+		return fallback
+	}
+	return parsed
+}
+
+func parseBoolEnv(key string, fallback bool) bool {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return fallback
+	}
+	parsed, err := strconv.ParseBool(raw)
 	if err != nil {
 		return fallback
 	}

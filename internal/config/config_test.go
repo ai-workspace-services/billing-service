@@ -203,3 +203,30 @@ func TestArrearsSuspendThresholdOverride(t *testing.T) {
 		t.Fatalf("ArrearsSuspendThreshold = %v, want %v", got, want)
 	}
 }
+
+func TestDualBucketQuotaEnforceDefaultsFalseAndParsesBool(t *testing.T) {
+	t.Setenv("APP_ENV", "test")
+	t.Setenv("DATABASE_URL", "postgres://example")
+	t.Setenv("INTERNAL_SERVICE_TOKEN", "token")
+	t.Setenv("BILLING_INGEST_MODE", "push")
+	t.Setenv("EXPORTER_BASE_URL", "")
+	t.Setenv("EXPORTER_SOURCES_JSON", "")
+	t.Setenv("DUAL_BUCKET_QUOTA_ENFORCE", "")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if cfg.DualBucketQuotaEnforce {
+		t.Fatalf("expected DualBucketQuotaEnforce to default to false")
+	}
+
+	t.Setenv("DUAL_BUCKET_QUOTA_ENFORCE", "true")
+	cfg, err = Load()
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if !cfg.DualBucketQuotaEnforce {
+		t.Fatalf("expected DualBucketQuotaEnforce=true when env is set")
+	}
+}

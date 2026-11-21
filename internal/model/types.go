@@ -14,6 +14,7 @@ type Snapshot struct {
 	CollectedAt time.Time `json:"collected_at"`
 	NodeID      string    `json:"node_id"`
 	Env         string    `json:"env"`
+	RoutingPool string    `json:"routing_pool,omitempty"`
 	Samples     []Sample  `json:"samples"`
 }
 
@@ -41,6 +42,7 @@ type MinuteBucket struct {
 	AccountUUID    string
 	Region         string
 	LineCode       string
+	RoutingPool    string
 	UplinkBytes    int64
 	DownlinkBytes  int64
 	TotalBytes     int64
@@ -62,12 +64,13 @@ type LedgerEntry struct {
 }
 
 type QuotaState struct {
-	PeriodStart            *time.Time
-	PeriodEnd              *time.Time
-	AccountUUID            string
-	RemainingIncludedQuota int64
-	CurrentBalance         float64
-	Arrears                bool
+	PeriodStart             *time.Time
+	PeriodEnd               *time.Time
+	AccountUUID             string
+	RemainingIncludedQuota  int64
+	RemainingHighSpeedQuota int64
+	CurrentBalance          float64
+	Arrears                 bool
 	// ArrearsSince marks when Arrears last flipped false->true. It is cleared
 	// (nil) whenever Arrears clears, so it always reflects the length of the
 	// current arrears episode rather than the account's first-ever failure.
@@ -79,15 +82,22 @@ type QuotaState struct {
 }
 
 type BillingProfile struct {
-	AccountUUID        string
-	PackageName        string
-	IncludedQuotaBytes int64
-	BasePricePerByte   float64
-	RegionMultiplier   float64
-	LineMultiplier     float64
-	PeakMultiplier     float64
-	OffPeakMultiplier  float64
-	PricingRuleVersion string
+	AccountUUID         string
+	PackageName         string
+	IncludedQuotaBytes  int64
+	HighSpeedQuotaBytes int64
+	BasePricePerByte    float64
+	RegionMultiplier    float64
+	LineMultiplier      float64
+	PeakMultiplier      float64
+	OffPeakMultiplier   float64
+	PricingRuleVersion  string
+}
+
+type NodePoolMetadata struct {
+	NodeID       string
+	Groups       []string
+	PricingGroup string
 }
 
 type SourceSyncState struct {

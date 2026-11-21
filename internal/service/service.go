@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"billing-service/internal/config"
@@ -13,6 +15,9 @@ import (
 	"billing-service/internal/repository"
 
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
 )
 
 const (
@@ -25,9 +30,13 @@ type windowSource interface {
 }
 
 type Service struct {
-	cfg    config.Config
-	source windowSource
-	repo   repository.Repository
+	cfg                    config.Config
+	source                 windowSource
+	repo                   repository.Repository
+	poolResolver           *NodePoolResolver
+	log                    *slog.Logger
+	shadowHighSpeedBytes   *atomic.Int64
+	shadowHighSpeedCounter metric.Int64Counter
 
 	mu         sync.Mutex
 	lastResult model.JobResult
@@ -39,12 +48,41 @@ func New(cfg config.Config, source windowSource, repo repository.Repository) *Se
 	// Push mode does not run the exporter collection loop. Its absence is not
 	// a failed collection; database readiness is checked separately by /readyz.
 	pushOnly := cfg.IngestMode == "push" && !cfg.PullEnabled && len(cfg.ExporterSources) == 0
-	return &Service{
-		cfg:    cfg,
-		source: source,
-		repo:   repo,
-		lastOK: pushOnly,
+	var reader repository.NodePoolMetadataReader
+	if r, ok := repo.(repository.NodePoolMetadataReader); ok {
+		reader = r
 	}
+	logger := slog.Default()
+	shadowCounter, _ := otel.Meter("billing-service").Int64Counter(
+		"shadow_high_speed_bytes",
+		metric.WithDescription("High-speed pool bytes observed in shadow mode when DUAL_BUCKET_QUOTA_ENFORCE=false"),
+	)
+	return &Service{
+		cfg:                    cfg,
+		source:                 source,
+		repo:                   repo,
+		poolResolver:           NewNodePoolResolver(reader, defaultPoolCacheTTL, logger),
+		log:                    logger,
+		shadowHighSpeedBytes:   &atomic.Int64{},
+		shadowHighSpeedCounter: shadowCounter,
+		lastOK:                 pushOnly,
+	}
+}
+
+// ShadowHighSpeedBytes returns the total Pro-EC2-Pool bytes recorded in shadow mode.
+func (s *Service) ShadowHighSpeedBytes() int64 {
+	if s.shadowHighSpeedBytes == nil {
+		return 0
+	}
+	return s.shadowHighSpeedBytes.Load()
+}
+
+// UnknownNodePoolCount returns how many samples fell back to Media-Pool due to unknown node pool metadata.
+func (s *Service) UnknownNodePoolCount() int64 {
+	if s.poolResolver == nil {
+		return 0
+	}
+	return s.poolResolver.UnknownPoolCount()
 }
 
 func (s *Service) Start(ctx context.Context) {
@@ -325,13 +363,25 @@ func aggregateSamplesByUUID(samples []model.Sample, result *model.JobResult) []m
 	return out
 }
 
+func (s *Service) withRepo(repo repository.Repository) *Service {
+	return &Service{
+		cfg:                    s.cfg,
+		source:                 s.source,
+		repo:                   repo,
+		poolResolver:           s.poolResolver,
+		log:                    s.log,
+		shadowHighSpeedBytes:   s.shadowHighSpeedBytes,
+		shadowHighSpeedCounter: s.shadowHighSpeedCounter,
+	}
+}
+
 func (s *Service) processSample(ctx context.Context, snapshot model.Snapshot, sample model.Sample, result *model.JobResult) (bool, error) {
 	if transactional, ok := s.repo.(interface {
 		WithAccountTransaction(context.Context, string, func(repository.Repository) error) error
 	}); ok {
 		var processed bool
 		err := transactional.WithAccountTransaction(ctx, sample.UUID, func(repo repository.Repository) error {
-			scoped := &Service{cfg: s.cfg, source: s.source, repo: repo}
+			scoped := s.withRepo(repo)
 			var err error
 			processed, err = scoped.processSampleLocked(ctx, snapshot, sample, result)
 			return err
@@ -340,6 +390,7 @@ func (s *Service) processSample(ctx context.Context, snapshot model.Snapshot, sa
 	}
 	return s.processSampleLocked(ctx, snapshot, sample, result)
 }
+
 func (s *Service) processSampleLocked(ctx context.Context, snapshot model.Snapshot, sample model.Sample, result *model.JobResult) (bool, error) {
 	storageNodeID := composeStorageNodeID(snapshot.Env, snapshot.NodeID)
 	minuteStart := snapshot.CollectedAt.UTC().Truncate(time.Minute)
@@ -360,16 +411,7 @@ func (s *Service) processSampleLocked(ctx context.Context, snapshot model.Snapsh
 
 	if deltaUplink < 0 || deltaDownlink < 0 {
 		resetEpoch++
-		err := s.repo.UpsertCheckpoint(ctx, model.Checkpoint{
-			NodeID:            storageNodeID,
-			AccountUUID:       sample.UUID,
-			LastUplinkTotal:   sample.UplinkBytesTotal,
-			LastDownlinkTotal: sample.DownlinkBytesTotal,
-			LastSeenAt:        snapshot.CollectedAt.UTC(),
-			XrayRevision:      s.cfg.SourceRevision,
-			ResetEpoch:        resetEpoch,
-		})
-		if err != nil {
+		if err := s.upsertSampleCheckpoint(ctx, storageNodeID, sample, snapshot.CollectedAt, resetEpoch); err != nil {
 			return false, fmt.Errorf("upsert reset checkpoint %s: %w", sample.UUID, err)
 		}
 		return false, nil
@@ -381,6 +423,11 @@ func (s *Service) processSampleLocked(ctx context.Context, snapshot model.Snapsh
 		return false, fmt.Errorf("get billing profile %s: %w", sample.UUID, err)
 	}
 	effectivePricing := resolvePricing(profile, s.cfg)
+	routingPool := s.resolveRoutingPool(ctx, storageNodeID, snapshot.RoutingPool)
+	ratingStatus := "rated"
+	if routingPool == PoolCustomDedicated {
+		ratingStatus = "exempt"
+	}
 
 	bucket := model.MinuteBucket{
 		BucketStart:    minuteStart,
@@ -388,11 +435,12 @@ func (s *Service) processSampleLocked(ctx context.Context, snapshot model.Snapsh
 		AccountUUID:    sample.UUID,
 		Region:         s.cfg.DefaultRegion,
 		LineCode:       strings.TrimSpace(sample.InboundTag),
+		RoutingPool:    routingPool,
 		UplinkBytes:    deltaUplink,
 		DownlinkBytes:  deltaDownlink,
 		TotalBytes:     totalBytes,
 		Multiplier:     effectivePricing.multiplier,
-		RatingStatus:   "rated",
+		RatingStatus:   ratingStatus,
 		SourceRevision: effectivePricing.pricingRuleVersion,
 	}
 
@@ -406,27 +454,59 @@ func (s *Service) processSampleLocked(ctx context.Context, snapshot model.Snapsh
 		result.WrittenMinutes++
 	}
 
-	entry := model.LedgerEntry{
-		ID:                 deterministicLedgerID(bucket),
-		AccountUUID:        sample.UUID,
-		BucketStart:        minuteStart,
-		BucketEnd:          minuteStart.Add(time.Minute),
-		EntryType:          "traffic_charge",
-		PricingRuleVersion: s.cfg.SourceRevision,
+	if routingPool == PoolCustomDedicated {
+		if err := s.upsertSampleCheckpoint(ctx, storageNodeID, sample, snapshot.CollectedAt, resetEpoch); err != nil {
+			return false, fmt.Errorf("upsert checkpoint %s: %w", sample.UUID, err)
+		}
+		return true, nil
 	}
 
+	if err := s.rateAndPersistQuota(ctx, snapshot, sample, bucket, routingPool, totalBytes, effectivePricing, result); err != nil {
+		return false, err
+	}
+
+	if err := s.upsertSampleCheckpoint(ctx, storageNodeID, sample, snapshot.CollectedAt, resetEpoch); err != nil {
+		return false, fmt.Errorf("upsert checkpoint %s: %w", sample.UUID, err)
+	}
+
+	return true, nil
+}
+
+func (s *Service) resolveRoutingPool(ctx context.Context, storageNodeID, snapshotRoutingPool string) string {
+	if s.poolResolver != nil {
+		return s.poolResolver.Resolve(ctx, storageNodeID, snapshotRoutingPool)
+	}
+	var reader repository.NodePoolMetadataReader
+	if r, ok := s.repo.(repository.NodePoolMetadataReader); ok {
+		reader = r
+	}
+	return NewNodePoolResolver(reader, defaultPoolCacheTTL, s.log).Resolve(ctx, storageNodeID, snapshotRoutingPool)
+}
+
+func (s *Service) rateAndPersistQuota(
+	ctx context.Context,
+	snapshot model.Snapshot,
+	sample model.Sample,
+	bucket model.MinuteBucket,
+	routingPool string,
+	totalBytes int64,
+	pricing effectivePricing,
+	result *model.JobResult,
+) error {
+	minuteStart := bucket.BucketStart
 	quota, err := s.repo.GetQuotaState(ctx, sample.UUID)
 	if err != nil {
-		return false, fmt.Errorf("get quota state %s: %w", sample.UUID, err)
+		return fmt.Errorf("get quota state %s: %w", sample.UUID, err)
 	}
 	if quota == nil {
 		quota = &model.QuotaState{
-			AccountUUID:            sample.UUID,
-			RemainingIncludedQuota: effectivePricing.includedQuotaBytes,
-			CurrentBalance:         s.cfg.InitialBalance,
-			ThrottleState:          "normal",
-			SuspendState:           "active",
-			EffectiveAt:            snapshot.CollectedAt.UTC(),
+			AccountUUID:             sample.UUID,
+			RemainingIncludedQuota:  pricing.includedQuotaBytes,
+			RemainingHighSpeedQuota: pricing.highSpeedQuotaBytes,
+			CurrentBalance:          s.cfg.InitialBalance,
+			ThrottleState:           "normal",
+			SuspendState:            "active",
+			EffectiveAt:             snapshot.CollectedAt.UTC(),
 		}
 	}
 
@@ -437,67 +517,127 @@ func (s *Service) processSampleLocked(ctx context.Context, snapshot model.Snapsh
 		ratingBytes = 0
 	}
 
-	includedApplied := minInt64(quota.RemainingIncludedQuota, ratingBytes)
+	useHighSpeedBucket := routingPool == PoolProEC2 && s.cfg.DualBucketQuotaEnforce
+	bucketAvailable := quota.RemainingIncludedQuota
+	if useHighSpeedBucket {
+		bucketAvailable = quota.RemainingHighSpeedQuota
+	}
+	if bucketAvailable < 0 {
+		bucketAvailable = 0
+	}
+
+	includedApplied := minInt64(bucketAvailable, ratingBytes)
 	chargeableBytes := ratingBytes - includedApplied
-	amountDelta := -float64(chargeableBytes) * effectivePricing.basePricePerByte * effectivePricing.multiplier
-	entry.RatedBytes = chargeableBytes
-	entry.AmountDelta = amountDelta
-	entry.PricingRuleVersion = effectivePricing.pricingRuleVersion
-	entry.BalanceAfter = quota.CurrentBalance + amountDelta
+	amountDelta := -float64(chargeableBytes) * pricing.basePricePerByte * pricing.multiplier
+	entry := model.LedgerEntry{
+		ID:                 deterministicLedgerID(bucket),
+		AccountUUID:        sample.UUID,
+		BucketStart:        minuteStart,
+		BucketEnd:          minuteStart.Add(time.Minute),
+		EntryType:          "traffic_charge",
+		RatedBytes:         chargeableBytes,
+		AmountDelta:        amountDelta,
+		BalanceAfter:       quota.CurrentBalance + amountDelta,
+		PricingRuleVersion: pricing.pricingRuleVersion,
+	}
 
 	ledgerExisted, err := s.repo.UpsertLedger(ctx, entry)
 	if err != nil {
-		return false, fmt.Errorf("upsert ledger %s: %w", sample.UUID, err)
+		return fmt.Errorf("upsert ledger %s: %w", sample.UUID, err)
+	}
+	if ledgerExisted {
+		result.ReplayedMinutes++
+		return nil
 	}
 
-	if !ledgerExisted {
-		remainingQuota := quota.RemainingIncludedQuota - includedApplied
-		if remainingQuota < 0 {
-			remainingQuota = 0
-		}
-		quota.RemainingIncludedQuota = remainingQuota
-		quota.CurrentBalance = entry.BalanceAfter
-		quota.Arrears = quota.CurrentBalance < 0
-		if quota.Arrears {
-			quota.ThrottleState = "throttled"
-			if quota.ArrearsSince == nil {
-				since := snapshot.CollectedAt.UTC()
-				quota.ArrearsSince = &since
-			}
-		} else {
-			quota.ThrottleState = "normal"
-			quota.ArrearsSince = nil
-		}
-		quota.EffectiveAt = snapshot.CollectedAt.UTC()
-		lastRated := minuteStart
-		quota.LastRatedBucketAt = &lastRated
-		if err := s.repo.UpsertQuotaState(ctx, *quota); err != nil {
-			return false, fmt.Errorf("upsert quota state %s: %w", sample.UUID, err)
+	if useHighSpeedBucket {
+		quota.RemainingHighSpeedQuota = clampNonNegative(quota.RemainingHighSpeedQuota - includedApplied)
+	} else {
+		quota.RemainingIncludedQuota = clampNonNegative(quota.RemainingIncludedQuota - includedApplied)
+	}
+
+	if routingPool == PoolProEC2 && !s.cfg.DualBucketQuotaEnforce && ratingBytes > 0 {
+		s.recordShadowHighSpeedUsage(ctx, sample.UUID, bucket.NodeID, ratingBytes, includedApplied, quota)
+	}
+
+	applyBalanceAndArrears(quota, entry.BalanceAfter, minuteStart, snapshot.CollectedAt)
+	if err := s.repo.UpsertQuotaState(ctx, *quota); err != nil {
+		return fmt.Errorf("upsert quota state %s: %w", sample.UUID, err)
+	}
+	return nil
+}
+
+func (s *Service) recordShadowHighSpeedUsage(ctx context.Context, accountUUID, storageNodeID string, ratingBytes, legacyIncludedApplied int64, quota *model.QuotaState) {
+	if s.shadowHighSpeedBytes != nil {
+		s.shadowHighSpeedBytes.Add(ratingBytes)
+	}
+	if s.shadowHighSpeedCounter != nil {
+		s.shadowHighSpeedCounter.Add(ctx, ratingBytes, metric.WithAttributes(attribute.String("routing_pool", PoolProEC2)))
+	}
+	shadowAvailable := clampNonNegative(quota.RemainingHighSpeedQuota)
+	shadowApplied := minInt64(shadowAvailable, ratingBytes)
+	shadowRemaining := shadowAvailable - shadowApplied
+	shadowOverage := ratingBytes - shadowApplied
+	logger := s.log
+	if logger == nil {
+		logger = slog.Default()
+	}
+	logger.InfoContext(ctx, "shadow high-speed traffic metered",
+		"account_uuid", accountUUID,
+		"node_id", storageNodeID,
+		"routing_pool", PoolProEC2,
+		"shadow_high_speed_bytes", ratingBytes,
+		"shadow_high_speed_applied", shadowApplied,
+		"shadow_high_speed_overage_bytes", shadowOverage,
+		"shadow_remaining_high_speed_quota", shadowRemaining,
+		"legacy_included_applied", legacyIncludedApplied,
+		"remaining_included_quota", quota.RemainingIncludedQuota,
+	)
+}
+
+func applyBalanceAndArrears(quota *model.QuotaState, balanceAfter float64, minuteStart, collectedAt time.Time) {
+	quota.CurrentBalance = balanceAfter
+	quota.Arrears = quota.CurrentBalance < 0
+	if quota.Arrears {
+		quota.ThrottleState = "throttled"
+		if quota.ArrearsSince == nil {
+			since := collectedAt.UTC()
+			quota.ArrearsSince = &since
 		}
 	} else {
-		result.ReplayedMinutes++
+		quota.ThrottleState = "normal"
+		quota.ArrearsSince = nil
 	}
+	quota.EffectiveAt = collectedAt.UTC()
+	lastRated := minuteStart
+	quota.LastRatedBucketAt = &lastRated
+}
 
-	if err := s.repo.UpsertCheckpoint(ctx, model.Checkpoint{
+func (s *Service) upsertSampleCheckpoint(ctx context.Context, storageNodeID string, sample model.Sample, collectedAt time.Time, resetEpoch int64) error {
+	return s.repo.UpsertCheckpoint(ctx, model.Checkpoint{
 		NodeID:            storageNodeID,
 		AccountUUID:       sample.UUID,
 		LastUplinkTotal:   sample.UplinkBytesTotal,
 		LastDownlinkTotal: sample.DownlinkBytesTotal,
-		LastSeenAt:        snapshot.CollectedAt.UTC(),
+		LastSeenAt:        collectedAt.UTC(),
 		XrayRevision:      s.cfg.SourceRevision,
 		ResetEpoch:        resetEpoch,
-	}); err != nil {
-		return false, fmt.Errorf("upsert checkpoint %s: %w", sample.UUID, err)
-	}
+	})
+}
 
-	return true, nil
+func clampNonNegative(v int64) int64 {
+	if v < 0 {
+		return 0
+	}
+	return v
 }
 
 type effectivePricing struct {
-	includedQuotaBytes int64
-	basePricePerByte   float64
-	multiplier         float64
-	pricingRuleVersion string
+	includedQuotaBytes  int64
+	highSpeedQuotaBytes int64
+	basePricePerByte    float64
+	multiplier          float64
+	pricingRuleVersion  string
 }
 
 func resolvePricing(profile *model.BillingProfile, cfg config.Config) effectivePricing {
@@ -512,6 +652,9 @@ func resolvePricing(profile *model.BillingProfile, cfg config.Config) effectiveP
 	}
 	if profile.IncludedQuotaBytes > 0 {
 		pricing.includedQuotaBytes = profile.IncludedQuotaBytes
+	}
+	if profile.HighSpeedQuotaBytes > 0 {
+		pricing.highSpeedQuotaBytes = profile.HighSpeedQuotaBytes
 	}
 	if profile.BasePricePerByte > 0 {
 		pricing.basePricePerByte = profile.BasePricePerByte
