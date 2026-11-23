@@ -499,6 +499,10 @@ func (s *Service) rateAndPersistQuota(
 		return fmt.Errorf("get quota state %s: %w", sample.UUID, err)
 	}
 	if quota == nil {
+		initialProxyState := "active"
+		if pricing.isPaused {
+			initialProxyState = "paused"
+		}
 		quota = &model.QuotaState{
 			AccountUUID:             sample.UUID,
 			RemainingIncludedQuota:  pricing.includedQuotaBytes,
@@ -506,8 +510,11 @@ func (s *Service) rateAndPersistQuota(
 			CurrentBalance:          s.cfg.InitialBalance,
 			ThrottleState:           "normal",
 			SuspendState:            "active",
+			ProxyAccessState:        initialProxyState,
 			EffectiveAt:             snapshot.CollectedAt.UTC(),
 		}
+	} else if strings.TrimSpace(quota.ProxyAccessState) == "" {
+		quota.ProxyAccessState = "active"
 	}
 
 	// Late buckets preceding a mid-month reset remain in raw history but
@@ -517,7 +524,7 @@ func (s *Service) rateAndPersistQuota(
 		ratingBytes = 0
 	}
 
-	useHighSpeedBucket := routingPool == PoolProEC2 && s.cfg.DualBucketQuotaEnforce
+	useHighSpeedBucket := routingPool == PoolProEC2 && s.cfg.DualBucketQuotaEnforce && !pricing.isOneTimeTrial
 	bucketAvailable := quota.RemainingIncludedQuota
 	if useHighSpeedBucket {
 		bucketAvailable = quota.RemainingHighSpeedQuota
@@ -528,7 +535,10 @@ func (s *Service) rateAndPersistQuota(
 
 	includedApplied := minInt64(bucketAvailable, ratingBytes)
 	chargeableBytes := ratingBytes - includedApplied
-	amountDelta := -float64(chargeableBytes) * pricing.basePricePerByte * pricing.multiplier
+	// PAYG is retired: overage traffic never debits wallet balance into negative
+	// arrears; exhausted accounts transition to paused traffic mode until
+	// reactivated by subscription purchase.
+	amountDelta := 0.0
 	entry := model.LedgerEntry{
 		ID:                 deterministicLedgerID(bucket),
 		AccountUUID:        sample.UUID,
@@ -537,7 +547,7 @@ func (s *Service) rateAndPersistQuota(
 		EntryType:          "traffic_charge",
 		RatedBytes:         chargeableBytes,
 		AmountDelta:        amountDelta,
-		BalanceAfter:       quota.CurrentBalance + amountDelta,
+		BalanceAfter:       quota.CurrentBalance,
 		PricingRuleVersion: pricing.pricingRuleVersion,
 	}
 
@@ -561,6 +571,19 @@ func (s *Service) rateAndPersistQuota(
 	}
 
 	applyBalanceAndArrears(quota, entry.BalanceAfter, minuteStart, snapshot.CollectedAt)
+	dualBucketPro := s.cfg.DualBucketQuotaEnforce && !pricing.isOneTimeTrial && pricing.includedQuotaBytes > 0 && pricing.highSpeedQuotaBytes > 0
+	switch {
+	case pricing.isPaused:
+		quota.ProxyAccessState = "paused"
+	case dualBucketPro:
+		if quota.RemainingIncludedQuota <= 0 && quota.RemainingHighSpeedQuota <= 0 {
+			quota.ProxyAccessState = "paused"
+		}
+	case pricing.includedQuotaBytes > 0:
+		if quota.RemainingIncludedQuota <= 0 {
+			quota.ProxyAccessState = "paused"
+		}
+	}
 	if err := s.repo.UpsertQuotaState(ctx, *quota); err != nil {
 		return fmt.Errorf("upsert quota state %s: %w", sample.UUID, err)
 	}
@@ -633,6 +656,9 @@ func clampNonNegative(v int64) int64 {
 }
 
 type effectivePricing struct {
+	packageName         string
+	isOneTimeTrial      bool
+	isPaused            bool
 	includedQuotaBytes  int64
 	highSpeedQuotaBytes int64
 	basePricePerByte    float64
@@ -650,8 +676,12 @@ func resolvePricing(profile *model.BillingProfile, cfg config.Config) effectiveP
 	if profile == nil {
 		return pricing
 	}
-	if profile.IncludedQuotaBytes > 0 {
-		pricing.includedQuotaBytes = profile.IncludedQuotaBytes
+	pricing.packageName = strings.ToLower(strings.TrimSpace(profile.PackageName))
+	ruleUpper := strings.ToUpper(strings.TrimSpace(profile.PricingRuleVersion))
+	pricing.isOneTimeTrial = pricing.packageName == "trial" || ruleUpper == "PLAN:TRIAL-5GB-ONCE"
+	pricing.isPaused = pricing.packageName == "paused" || ruleUpper == "PLAN:PAUSED"
+	if profile.IncludedQuotaBytes > 0 || pricing.isPaused {
+		pricing.includedQuotaBytes = max(int64(0), profile.IncludedQuotaBytes)
 	}
 	if profile.HighSpeedQuotaBytes > 0 {
 		pricing.highSpeedQuotaBytes = profile.HighSpeedQuotaBytes

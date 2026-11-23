@@ -352,7 +352,7 @@ func TestDualBucketEnforceModeIsolatesPoolsAndHandlesOverageAndReplay(t *testing
 		t.Fatalf("unexpected media bucket: %+v", mediaBucket)
 	}
 
-	// 3. Pro-EC2-Pool overage: cumulative 3500 (delta 2500 > remaining 2000) -> 500 chargeable bytes at 0.5 = -250 -> balance -150, arrears=true, VPS quota STILL 3500!
+	// 3. Pro-EC2-Pool overage: cumulative 3500 (delta 2500 > remaining 2000) -> RemainingHighSpeedQuota hits 0, VPS quota stays 3500, NO negative balance debit, proxy stays active while VPS quota remains!
 	proSnap2 := model.Snapshot{
 		CollectedAt: time.Date(2026, 11, 21, 10, 2, 15, 0, time.UTC),
 		NodeID:      "jp-xconnect-pro-01.svc.plus",
@@ -373,8 +373,89 @@ func TestDualBucketEnforceModeIsolatesPoolsAndHandlesOverageAndReplay(t *testing
 	if q.RemainingIncludedQuota != 3500 {
 		t.Fatalf("Pro overage must leave RemainingIncludedQuota untouched at 3500, got %d", q.RemainingIncludedQuota)
 	}
-	if q.CurrentBalance != -150 || !q.Arrears || q.ThrottleState != "throttled" {
-		t.Fatalf("unexpected overage balance/arrears state: %+v", q)
+	if q.CurrentBalance != 100 || q.Arrears || q.ProxyAccessState != "active" || q.SuspendState != "active" {
+		t.Fatalf("expected balance untouched and proxy active while VPS quota remains: %+v", q)
+	}
+
+	// 4. Exhaust Media-Pool remaining 3500 -> both buckets 0 triggers proxy_access_state='paused' with suspend_state='active'.
+	mediaSnap2 := model.Snapshot{
+		CollectedAt: time.Date(2026, 11, 21, 10, 3, 15, 0, time.UTC),
+		NodeID:      "jp-xconnect-01.svc.plus",
+		Env:         "prod",
+		Samples: []model.Sample{{
+			UUID:               accountUUID,
+			UplinkBytesTotal:   3000,
+			DownlinkBytesTotal: 2500,
+		}},
+	}
+	if _, err := svc.IngestSnapshot(ctx, mediaSnap2); err != nil {
+		t.Fatalf("media ingest 2 exhaustion: %v", err)
+	}
+	q = repo.quotas[accountUUID]
+	if q.RemainingIncludedQuota != 0 || q.RemainingHighSpeedQuota != 0 || q.ProxyAccessState != "paused" || q.SuspendState != "active" {
+		t.Fatalf("exhausting both Pro buckets must pause proxy access while keeping suspend_state active: %+v", q)
+	}
+}
+
+func TestOneTimeTrialSharesSingleBucketAcrossPublicPoolsAndPausesOnExhaustion(t *testing.T) {
+	repo := newMemoryRepo()
+	accountUUID := "22222222-2222-2222-2222-222222222222"
+	repo.nodeMetadata["jp-xconnect-pro-01.svc.plus"] = model.NodePoolMetadata{
+		NodeID: "jp-xconnect-pro-01.svc.plus",
+		Groups: []string{"resource:pro"},
+	}
+	repo.nodeMetadata["jp-xconnect-01.svc.plus"] = model.NodePoolMetadata{
+		NodeID: "jp-xconnect-01.svc.plus",
+		Groups: []string{"resource:plus"},
+	}
+	repo.profiles[accountUUID] = model.BillingProfile{
+		AccountUUID:        accountUUID,
+		PackageName:        "trial",
+		IncludedQuotaBytes: 5000,
+		PricingRuleVersion: "plan:TRIAL-5GB-ONCE",
+	}
+
+	cfg := baseConfig()
+	cfg.ExporterSources = nil
+	cfg.PullEnabled = false
+	cfg.DualBucketQuotaEnforce = true
+	svc := New(cfg, nil, repo)
+	ctx := context.Background()
+
+	// Trial consumption on Pro-EC2-Pool deducts from the single RemainingIncludedQuota bucket.
+	if _, err := svc.IngestSnapshot(ctx, model.Snapshot{
+		CollectedAt: time.Date(2026, 11, 23, 10, 0, 15, 0, time.UTC),
+		NodeID:      "jp-xconnect-pro-01.svc.plus",
+		Env:         "prod",
+		Samples: []model.Sample{{
+			UUID:               accountUUID,
+			UplinkBytesTotal:   1200,
+			DownlinkBytesTotal: 800,
+		}},
+	}); err != nil {
+		t.Fatalf("trial Pro pool ingest: %v", err)
+	}
+	q := repo.quotas[accountUUID]
+	if q.RemainingIncludedQuota != 3000 || q.ProxyAccessState != "active" || q.CurrentBalance != 0 {
+		t.Fatalf("unexpected trial state after Pro-EC2 usage: %+v", q)
+	}
+
+	// Remaining 3000 bytes exhausted on Media-Pool -> transitions to paused without arrears or account suspension.
+	if _, err := svc.IngestSnapshot(ctx, model.Snapshot{
+		CollectedAt: time.Date(2026, 11, 23, 10, 1, 15, 0, time.UTC),
+		NodeID:      "jp-xconnect-01.svc.plus",
+		Env:         "prod",
+		Samples: []model.Sample{{
+			UUID:               accountUUID,
+			UplinkBytesTotal:   2000,
+			DownlinkBytesTotal: 1500,
+		}},
+	}); err != nil {
+		t.Fatalf("trial Media pool exhaustion: %v", err)
+	}
+	q = repo.quotas[accountUUID]
+	if q.RemainingIncludedQuota != 0 || q.ProxyAccessState != "paused" || q.SuspendState != "active" || q.Arrears {
+		t.Fatalf("exhausted one-time trial must pause traffic without arrears or account suspension: %+v", q)
 	}
 }
 

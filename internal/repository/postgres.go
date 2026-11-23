@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"billing-service/internal/model"
@@ -184,7 +185,7 @@ func (p *Postgres) GetQuotaState(ctx context.Context, accountUUID string) (*mode
 	}
 
 	const query = `
-		SELECT account_uuid, remaining_included_quota, remaining_high_speed_quota, current_balance, arrears, arrears_since, throttle_state, suspend_state, last_rated_bucket_at, effective_at, period_start, period_end
+		SELECT account_uuid, remaining_included_quota, remaining_high_speed_quota, current_balance, arrears, arrears_since, throttle_state, suspend_state, COALESCE(NULLIF(trim(proxy_access_state), ''), 'active'), last_rated_bucket_at, effective_at, period_start, period_end
 		FROM account_quota_states
 		WHERE account_uuid = $1`
 	var state model.QuotaState
@@ -199,6 +200,7 @@ func (p *Postgres) GetQuotaState(ctx context.Context, accountUUID string) (*mode
 		&arrearsSince,
 		&state.ThrottleState,
 		&state.SuspendState,
+		&state.ProxyAccessState,
 		&lastRated,
 		&state.EffectiveAt, &periodStart, &periodEnd,
 	)
@@ -226,10 +228,14 @@ func (p *Postgres) GetQuotaState(ctx context.Context, accountUUID string) (*mode
 }
 
 func (p *Postgres) UpsertQuotaState(ctx context.Context, state model.QuotaState) error {
+	proxyAccessState := strings.TrimSpace(state.ProxyAccessState)
+	if proxyAccessState == "" {
+		proxyAccessState = "active"
+	}
 	const query = `
 		INSERT INTO account_quota_states (
-			account_uuid, remaining_included_quota, remaining_high_speed_quota, current_balance, arrears, arrears_since, throttle_state, suspend_state, last_rated_bucket_at, effective_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+			account_uuid, remaining_included_quota, remaining_high_speed_quota, current_balance, arrears, arrears_since, throttle_state, suspend_state, proxy_access_state, last_rated_bucket_at, effective_at
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 		ON CONFLICT (account_uuid) DO UPDATE SET
 			remaining_included_quota = EXCLUDED.remaining_included_quota,
 			remaining_high_speed_quota = EXCLUDED.remaining_high_speed_quota,
@@ -238,6 +244,7 @@ func (p *Postgres) UpsertQuotaState(ctx context.Context, state model.QuotaState)
 			arrears_since = EXCLUDED.arrears_since,
 			throttle_state = EXCLUDED.throttle_state,
 			suspend_state = EXCLUDED.suspend_state,
+			proxy_access_state = EXCLUDED.proxy_access_state,
 			last_rated_bucket_at = EXCLUDED.last_rated_bucket_at,
 			effective_at = EXCLUDED.effective_at,
 			updated_at = now()`
@@ -259,6 +266,7 @@ func (p *Postgres) UpsertQuotaState(ctx context.Context, state model.QuotaState)
 		arrearsSince,
 		state.ThrottleState,
 		state.SuspendState,
+		proxyAccessState,
 		lastRated,
 		state.EffectiveAt.UTC(),
 	)
@@ -270,7 +278,7 @@ func (p *Postgres) UpsertQuotaState(ctx context.Context, state model.QuotaState)
 // evaluate against the configured grace threshold.
 func (p *Postgres) ListArrearsAccounts(ctx context.Context) ([]model.QuotaState, error) {
 	const query = `
-		SELECT account_uuid, remaining_included_quota, remaining_high_speed_quota, current_balance, arrears, arrears_since, throttle_state, suspend_state, last_rated_bucket_at, effective_at
+		SELECT account_uuid, remaining_included_quota, remaining_high_speed_quota, current_balance, arrears, arrears_since, throttle_state, suspend_state, COALESCE(NULLIF(trim(proxy_access_state), ''), 'active'), last_rated_bucket_at, effective_at
 		FROM account_quota_states
 		WHERE arrears = true AND suspend_state <> 'suspended'`
 	rows, err := p.db.QueryContext(ctx, query)
@@ -293,6 +301,7 @@ func (p *Postgres) ListArrearsAccounts(ctx context.Context) ([]model.QuotaState,
 			&arrearsSince,
 			&state.ThrottleState,
 			&state.SuspendState,
+			&state.ProxyAccessState,
 			&lastRated,
 			&state.EffectiveAt,
 		); err != nil {
