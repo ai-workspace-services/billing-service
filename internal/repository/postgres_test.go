@@ -142,19 +142,19 @@ func TestPostgresQuotaAndProfileDualBucketFields(t *testing.T) {
 				return []string{
 					"account_uuid", "remaining_included_quota", "remaining_high_speed_quota",
 					"current_balance", "arrears", "arrears_since", "throttle_state",
-					"suspend_state", "last_rated_bucket_at", "effective_at", "period_start", "period_end",
+					"suspend_state", "proxy_access_state", "last_rated_bucket_at", "effective_at", "period_start", "period_end",
 				}, [][]driver.Value{{
 					"11111111-1111-1111-1111-111111111111", int64(5000), int64(3000),
-					25.5, false, nil, "normal", "active", now, now, now, now.Add(24 * time.Hour),
+					25.5, false, nil, "normal", "active", "active", now, now, now, now.Add(24 * time.Hour),
 				}}, nil
 			case strings.Contains(query, "FROM account_quota_states") && strings.Contains(query, "arrears = true"):
 				return []string{
 					"account_uuid", "remaining_included_quota", "remaining_high_speed_quota",
 					"current_balance", "arrears", "arrears_since", "throttle_state",
-					"suspend_state", "last_rated_bucket_at", "effective_at",
+					"suspend_state", "proxy_access_state", "last_rated_bucket_at", "effective_at",
 				}, [][]driver.Value{{
 					"11111111-1111-1111-1111-111111111111", int64(100), int64(200),
-					-5.0, true, now, "throttled", "active", now, now,
+					-5.0, true, now, "throttled", "active", "active", now, now,
 				}}, nil
 			case strings.Contains(query, "FROM account_billing_profiles"):
 				return []string{
@@ -193,8 +193,8 @@ func TestPostgresQuotaAndProfileDualBucketFields(t *testing.T) {
 		t.Fatalf("UpsertQuotaState: %v", err)
 	}
 	lastExec := fixture.execs[len(fixture.execs)-1]
-	if !strings.Contains(lastExec.query, "remaining_high_speed_quota") {
-		t.Fatalf("expected remaining_high_speed_quota in UpsertQuotaState: %s", lastExec.query)
+	if !strings.Contains(lastExec.query, "remaining_high_speed_quota") || !strings.Contains(lastExec.query, "proxy_access_state") {
+		t.Fatalf("expected remaining_high_speed_quota and proxy_access_state in UpsertQuotaState: %s", lastExec.query)
 	}
 	if lastExec.args[2] != int64(2500) {
 		t.Fatalf("expected remaining_high_speed_quota arg 2500, got %v", lastExec.args[2])

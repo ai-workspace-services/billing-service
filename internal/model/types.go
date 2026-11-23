@@ -77,6 +77,7 @@ type QuotaState struct {
 	ArrearsSince      *time.Time
 	ThrottleState     string
 	SuspendState      string
+	ProxyAccessState  string
 	LastRatedBucketAt *time.Time
 	EffectiveAt       time.Time
 }

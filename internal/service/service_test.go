@@ -243,8 +243,8 @@ func TestDeltaCalculationAndQuotaUpdate(t *testing.T) {
 		t.Fatalf("unexpected result %#v", result)
 	}
 	quota := repo.quotas["11111111-1111-1111-1111-111111111111"]
-	if quota.CurrentBalance != -75 {
-		t.Fatalf("expected current balance -75, got %v", quota.CurrentBalance)
+	if quota.CurrentBalance != 0 || quota.Arrears || quota.SuspendState != "active" {
+		t.Fatalf("expected non-PAYG zero balance debit and active suspend state, got %+v", quota)
 	}
 }
 
@@ -289,8 +289,11 @@ func TestIncludedQuotaAndMultipliersFromBillingProfile(t *testing.T) {
 	if quota.RemainingIncludedQuota != 0 {
 		t.Fatalf("expected remaining quota 0, got %d", quota.RemainingIncludedQuota)
 	}
-	if quota.CurrentBalance != -60 {
-		t.Fatalf("expected current balance -60, got %v", quota.CurrentBalance)
+	if quota.ProxyAccessState != "paused" || quota.SuspendState != "active" {
+		t.Fatalf("expected quota exhaustion to pause proxy traffic without suspending account, got %+v", quota)
+	}
+	if quota.CurrentBalance != 0 || quota.Arrears {
+		t.Fatalf("expected no PAYG negative balance debit on exhaustion, got %+v", quota)
 	}
 
 	bucket := repo.buckets[bucketKey(model.MinuteBucket{
@@ -307,8 +310,8 @@ func TestIncludedQuotaAndMultipliersFromBillingProfile(t *testing.T) {
 		if entry.RatedBytes != 50 {
 			t.Fatalf("expected rated bytes 50, got %d", entry.RatedBytes)
 		}
-		if entry.AmountDelta != -60 {
-			t.Fatalf("expected amount delta -60, got %v", entry.AmountDelta)
+		if entry.AmountDelta != 0 {
+			t.Fatalf("expected amount delta 0 with PAYG retired, got %v", entry.AmountDelta)
 		}
 		if entry.PricingRuleVersion != "pricing-v2" {
 			t.Fatalf("expected pricing version pricing-v2, got %q", entry.PricingRuleVersion)
