@@ -22,7 +22,6 @@ import (
 
 	"github.com/XSAM/otelsql"
 	_ "github.com/jackc/pgx/v5/stdlib"
-	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
 
 func main() {
@@ -48,13 +47,13 @@ func runBilling(ctx context.Context, cfg config.Config) error {
 			return fmt.Errorf("managed Billing runtime differs from explicit deployment controls")
 		}
 	}
-	shutdownTracing, err := observability.Configure(ctx, "web-saas-billing")
+	shutdownTracing, tracingProvider, err := observability.ConfigureTracing(ctx, "web-saas-billing")
 	if err != nil {
-		log.Printf("OTLP tracing disabled: %v", err)
+		log.Printf("tracing disabled: %v", err)
 	} else {
 		defer func() {
 			if err := shutdownTracing(context.Background()); err != nil {
-				log.Printf("flush OTLP traces: %v", err)
+				log.Printf("flush traces: %v", err)
 			}
 		}()
 	}
@@ -104,9 +103,11 @@ func runBilling(ctx context.Context, cfg config.Config) error {
 
 	server := &http.Server{
 		Addr: cfg.ListenAddr,
-		Handler: otelhttp.NewHandler(
-			observability.RequestLogger(logger, runtimeHandler),
+		Handler: observability.WrapHTTPHandler(
+			tracingProvider,
+			"web-saas-billing",
 			"billing.request",
+			observability.RequestLogger(logger, runtimeHandler),
 		),
 	}
 
