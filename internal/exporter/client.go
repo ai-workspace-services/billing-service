@@ -12,7 +12,7 @@ import (
 
 	"billing-service/internal/config"
 	"billing-service/internal/model"
-	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+	"billing-service/internal/observability"
 )
 
 type Client struct {
@@ -30,7 +30,7 @@ func (c *Client) FetchWindow(ctx context.Context, source config.ExporterSource, 
 	if timeout <= 0 {
 		timeout = 15 * time.Second
 	}
-	client := &http.Client{Timeout: timeout, Transport: otelhttp.NewTransport(http.DefaultTransport)}
+	client := observability.WrapHTTPClient(&http.Client{Timeout: timeout}, "web-saas-billing")
 
 	endpoint, err := url.JoinPath(strings.TrimRight(strings.TrimSpace(source.BaseURL), "/"), "/v1/snapshots/window")
 	if err != nil {

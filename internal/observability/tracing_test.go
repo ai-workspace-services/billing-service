@@ -51,3 +51,17 @@ func TestWrapHTTPHandler(t *testing.T) {
 		}
 	}
 }
+
+func TestWrapHTTPClient(t *testing.T) {
+	t.Run("ddtrace wraps transport", func(t *testing.T) {
+		t.Setenv("TRACING_PROVIDER", "")
+		t.Setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "")
+		t.Setenv("DD_AGENT_HOST", "datakit-service.observability-prod.svc")
+		t.Setenv("DD_TRACE_ENABLED", "true")
+		base := &http.Client{}
+		got := WrapHTTPClient(base, "web-saas-billing")
+		if got == nil || got.Transport == nil {
+			t.Fatalf("expected wrapped client transport for ddtrace")
+		}
+	})
+}

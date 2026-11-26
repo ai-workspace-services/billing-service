@@ -108,6 +108,27 @@ func WrapHTTPHandler(provider, defaultService, operation string, next http.Handl
 	}
 }
 
+// WrapHTTPClient instruments an outbound http.Client with OTel or DDTrace according to active provider.
+func WrapHTTPClient(client *http.Client, defaultService string) *http.Client {
+	if client == nil {
+		client = &http.Client{}
+	}
+	switch ResolveTracingProvider() {
+	case ProviderOTel:
+		base := client.Transport
+		if base == nil {
+			base = http.DefaultTransport
+		}
+		cloned := *client
+		cloned.Transport = otelhttp.NewTransport(base)
+		return &cloned
+	case ProviderDDTrace:
+		return httptrace.WrapClient(client, httptrace.WithService(DDTraceServiceName(defaultService)))
+	default:
+		return client
+	}
+}
+
 // DDTraceSpanAttrs returns trace/span IDs from an active DDTrace span when present.
 func DDTraceSpanAttrs(ctx context.Context, defaultService string) []any {
 	span, ok := tracer.SpanFromContext(ctx)
