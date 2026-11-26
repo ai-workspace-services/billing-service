@@ -1,14 +1,21 @@
+//go:build !no_apm
+
 package observability
 
 import (
 	"context"
+	"database/sql"
 	"net"
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 
+	sqltrace "github.com/DataDog/dd-trace-go/contrib/database/sql/v2"
 	httptrace "github.com/DataDog/dd-trace-go/contrib/net/http/v2"
 	"github.com/DataDog/dd-trace-go/v2/ddtrace/tracer"
+	"github.com/XSAM/otelsql"
+	"github.com/jackc/pgx/v5/stdlib"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
 
@@ -146,4 +153,21 @@ func DDTraceSpanAttrs(ctx context.Context, defaultService string) []any {
 		"dd.trace_id", sc.TraceID(),
 		"dd.span_id", sc.SpanID(),
 	)
+}
+
+var registerDDPGXOnce sync.Once
+
+// OpenPostgres opens a PostgreSQL connection pool instrumented with OTel or DDTrace.
+func OpenPostgres(dsn string) (*sql.DB, error) {
+	switch ResolveTracingProvider() {
+	case ProviderOTel:
+		return otelsql.Open("pgx", dsn)
+	case ProviderDDTrace:
+		registerDDPGXOnce.Do(func() {
+			sqltrace.Register("dd-pgx", &stdlib.Driver{}, sqltrace.WithService("postgres"))
+		})
+		return sqltrace.Open("dd-pgx", dsn)
+	default:
+		return sql.Open("pgx", dsn)
+	}
 }

@@ -8,7 +8,8 @@ RUN go mod download
 COPY cmd ./cmd
 COPY internal ./internal
 
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /out/billing-service ./cmd/billing-service
+ARG GO_BUILD_TAGS=""
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -tags "${GO_BUILD_TAGS}" -o /out/billing-service ./cmd/billing-service
 
 FROM alpine:3.22
 
