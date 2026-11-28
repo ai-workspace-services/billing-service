@@ -35,6 +35,9 @@ func nativeCheckpointRelations(version, count int, dirty bool) (int, error) {
 		// Accounts' pinned native artifact adds subscription_lifecycle_states
 		// and team_agent_enrollments. Billing's owned table contract is unchanged.
 		return 75, nil
+	case 2026112401:
+		// Accounts native 2026112401 has 80 business tables; Billing owns one.
+		return 81, nil
 	default:
 		return 0, errors.New("Billing native runtime requires a reviewed clean checkpoint")
 	}
